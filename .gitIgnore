@@ -1,0 +1,28 @@
+# Node.js and npm files
+node_modules/
+package-lock.json
+yarn.lock
+.pnp.js
+
+# TypeScript and build files
+dist/
+dist/**/*.js
+dist/**/*.d.ts
+dist/**/*.js.map
+dist/**/*.d.ts.map
+
+# Log files
+*.log
+*.log.*
+npm-debug*.log
+
+# Environment files
+.env
+.env.example
+config/*.env
+
+# IDE-specific files
+.vscode/
+.idea/
+*.swp
+*.swo
