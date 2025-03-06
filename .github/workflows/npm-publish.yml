@@ -26,6 +26,9 @@ jobs:
       - name: Create version bump if needed
         run: npx changeset version
 
+      - name: Remove node_modules before commit
+        run: rm -rf node_modules
+
       - name: Commit & push version bump
         run: |
           git config --global user.name "github-actions[bot]"
