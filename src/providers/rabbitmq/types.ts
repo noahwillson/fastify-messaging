@@ -9,3 +9,9 @@ export interface RabbitMQConfig extends MessagingConfig {
   heartbeat?: number;
   connectionTimeout?: number;
 }
+
+export type RabbitMQEvents =
+  | "connected"
+  | "disconnected"
+  | "reconnected"
+  | "error";
