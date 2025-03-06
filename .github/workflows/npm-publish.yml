@@ -24,7 +24,7 @@ jobs:
         run: rm -rf node_modules
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci # or npm install
 
       - name: Create version bump if needed
         run: npx changeset version
