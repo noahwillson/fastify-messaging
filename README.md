@@ -6,6 +6,28 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![TypeScript](https://img.shields.io/badge/%3C%2F%3E-TypeScript-blue)](https://www.typescriptlang.org/)
 
+## Table of Contents
+
+1. [Features](#features)
+2. [Installation](#installation)
+3. [Quick Start](#quick-start)
+   - [Publisher Service](#publisher-service)
+   - [Consumer Service](#consumer-service)
+4. [API Reference](#api-reference)
+   - [MessagingClient](#messagingclient)
+   - [RabbitMQClient](#rabbitmqclient)
+   - [fastifyMessaging](#fastifymessaging)
+5. [Publishing Messages](#publishing-messages)
+6. [Subscribing to Messages](#subscribing-to-messages)
+7. [Topic Patterns (RabbitMQ)](#topic-patterns-rabbitmq)
+8. [Error Handling](#error-handling)
+9. [Creating a Custom Provider](#creating-a-custom-provider)
+10. [Best Practices](#best-practices)
+11. [Why Use This Package?](#why-use-this-package)
+12. [Contributing](#contributing)
+13. [License](#license)
+14. [Acknowledgments](#acknowledgments)
+
 ## Features
 
 - Abstract messaging interface that can be implemented by different providers

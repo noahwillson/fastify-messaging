@@ -8,3 +8,10 @@ examples/
 jest.config.js
 tsconfig.json
 *.log
+.changeset/
+.env
+.env.local
+.env.*.local
+package-lock.json
+scripts/
+node_modules/
