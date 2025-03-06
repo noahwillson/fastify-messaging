@@ -20,12 +20,31 @@ declare module "fastify" {
         message: T,
         options?: MessageOptions
       ): Promise<boolean>;
+      publishToFanout<T>(
+        eventType: string,
+        message: T,
+        options?: MessageOptions
+      ): Promise<boolean>;
       subscribe<T>(
         topic: string,
         handler: MessageHandler<T>,
         options?: SubscriptionOptions
       ): Promise<string>;
+      subscribeToFanout<T>(
+        eventType: string,
+        handler: MessageHandler<T>,
+        queueName: string,
+        options?: SubscriptionOptions
+      ): Promise<string>;
+      subscribeWithDLX<T>(
+        topic: string,
+        handler: MessageHandler<T>,
+        dlxExchange: string,
+        dlxQueue: string,
+        options?: SubscriptionOptions
+      ): Promise<string>;
       unsubscribe(subscriptionId: string): Promise<void>;
+      onReconnect(callback: () => void): void;
     };
   }
 }
@@ -43,13 +62,17 @@ const fastifyMessaging: FastifyPluginAsync<FastifyMessagingOptions> = async (
   fastify.decorate("messaging", {
     client,
     publish: client.publish.bind(client),
+    publishToFanout: client.publishToFanout.bind(client),
     subscribe: client.subscribe.bind(client),
+    subscribeToFanout: client.subscribeToFanout.bind(client),
+    subscribeWithDLX: client.subscribeWithDLX.bind(client),
     unsubscribe: client.unsubscribe.bind(client),
+    onReconnect: client.onReconnect.bind(client),
   });
 
   // Close connection when Fastify closes
   fastify.addHook("onClose", async () => {
-    await client.close();
+    await client.gracefulShutdown();
   });
 };
 
