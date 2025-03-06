@@ -20,14 +20,14 @@ jobs:
           node-version: 18
           registry-url: "https://registry.npmjs.org/"
 
+      - name: Remove node_modules before commit
+        run: rm -rf node_modules
+
       - name: Install dependencies
         run: npm install
 
       - name: Create version bump if needed
         run: npx changeset version
-
-      - name: Remove node_modules before commit
-        run: rm -rf node_modules
 
       - name: Commit & push version bump
         run: |
