@@ -3,8 +3,8 @@ export interface MessageOptions {
   contentType?: string;
   contentEncoding?: string;
   persistent?: boolean;
-  expiration?: string | number;
-  priority?: number;
+  expiration?: string | number; // TTL in milliseconds
+  priority?: number; // Message priority (0-255)
   correlationId?: string;
   replyTo?: string;
   messageId?: string;
@@ -25,6 +25,7 @@ export interface SubscriptionOptions {
   durable?: boolean;
   autoDelete?: boolean;
   prefetch?: number;
+  arguments?: any; // RabbitMQ-specific queue arguments
   [key: string]: any;
 }
 
@@ -33,6 +34,26 @@ export interface MessageHandler<T = any> {
 }
 
 export interface MessagingConfig {
+  url: string;
+  exchange: string;
+  exchangeType?: "direct" | "topic" | "fanout" | "headers";
+  prefetch?: number;
   reconnectInterval?: number;
+  queueOptions?: {
+    durable?: boolean;
+    exclusive?: boolean;
+    autoDelete?: boolean;
+    arguments?: any;
+  };
+  exchangeOptions?: {
+    alternateExchange?: string;
+    arguments?: any;
+  };
+  serialize?: (message: any) => Buffer;
+  deserialize?: (buffer: Buffer) => any;
   [key: string]: any;
+}
+
+export interface FanoutSubscriptionOptions extends SubscriptionOptions {
+  eventType: string; // Event type for fanout exchange
 }
