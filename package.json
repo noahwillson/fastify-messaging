@@ -1,6 +1,9 @@
 {
   "name": "fastify-messaging",
   "version": "1.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Messaging abstraction for Fastify microservices",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
