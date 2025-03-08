@@ -19,25 +19,43 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
    - [fastifyMessaging](#fastifymessaging)
 5. [Publishing Messages](#publishing-messages)
 6. [Subscribing to Messages](#subscribing-to-messages)
-7. [Topic Patterns (RabbitMQ)](#topic-patterns-rabbitmq)
-8. [Error Handling](#error-handling)
-9. [Creating a Custom Provider](#creating-a-custom-provider)
-10. [Best Practices](#best-practices)
-11. [Why Use This Package?](#why-use-this-package)
-12. [Contributing](#contributing)
-13. [License](#license)
-14. [Acknowledgments](#acknowledgments)
+7. [Advanced Features](#advanced-features)
+   - [Fanout Exchanges](#fanout-exchanges)
+   - [Dead Letter Exchanges](#dead-letter-exchanges-dlx)
+   - [Event Handling](#event-handling)
+   - [Graceful Shutdown](#graceful-shutdown)
+8. [Topic Patterns (RabbitMQ)](#topic-patterns-rabbitmq)
+9. [Error Handling](#error-handling)
+10. [Creating a Custom Provider](#creating-a-custom-provider)
+11. [Best Practices](#best-practices)
+12. [Why Use This Package?](#why-use-this-package)
+13. [Contributing](#contributing)
+14. [License](#license)
+15. [Acknowledgments](#acknowledgments)
 
 ## Features
 
 - Abstract messaging interface that can be implemented by different providers
-- Built-in RabbitMQ implementation
+- Built-in RabbitMQ implementation with advanced features:
+  - Multiple exchange types (topic, fanout)
+  - Dead Letter Exchange (DLX) integration
+  - Configurable logging levels
+  - Event-driven connection lifecycle management
+  - Graceful shutdown handling
 - Fastify plugin for easy integration
 - TypeScript support with generics for message types
-- Automatic reconnection
-- Proper error handling
-- Subscription management
-- Message acknowledgment
+- Automatic reconnection with configurable intervals
+- Message TTL and priority support
+- Manual/Auto message acknowledgment modes
+- Prefetch configuration for message processing rate
+- Dynamic exchange and queue name configuration
+- Subscription management with queue options
+- **New Features:**
+  - **Reconnect Callback:** Set a callback function to be executed when the messaging client reconnects.
+  - **Logging Levels:** Configurable logging levels for better observability.
+  - **Dynamic Queue Creation:** Create dynamic queues for microservices.
+  - **Subscription with DLX:** Subscribe to messages with Dead Letter Exchange (DLX) support.
+  - **Fanout Exchange Subscription:** Subscribe to events from a fanout exchange using a dynamic queue.
 
 ## Installation
 
@@ -149,6 +167,13 @@ Abstract class that defines the messaging interface.
 - `subscribe<T>(topic: string, handler: MessageHandler<T>, options?: SubscriptionOptions)`: Subscribe to messages
 - `unsubscribe(subscriptionId: string)`: Unsubscribe from messages
 - `close()`: Close the connection
+- `on(event: RabbitMQEvents, listener)`: Listen to connection events
+- `onReconnect(callback)`: Set reconnection callback
+- `setLogLevel(level)`: Configure logging verbosity
+- `publishToFanout(eventType, message, options)`: Publish to fanout exchange
+- `subscribeToFanout(eventType, handler, queueName, options)`: Subscribe to fanout exchange
+- `subscribeWithDLX(topic, handler, dlxExchange, dlxQueue, options)`: Subscribe with DLX
+- `gracefulShutdown(timeout)`: Gracefully shutdown connection
 
 ### RabbitMQClient
 
@@ -161,11 +186,14 @@ interface RabbitMQConfig {
   url: string; // RabbitMQ connection URL
   exchange: string; // Exchange name
   exchangeType?: string; // Exchange type (default: 'topic')
+  exchangeOptions?: amqplib.Options.AssertExchange;
   prefetch?: number; // Prefetch count (default: 10)
   reconnectInterval?: number; // Reconnection interval in ms (default: 5000)
   vhost?: string; // Virtual host
   heartbeat?: number; // Heartbeat interval in seconds
   connectionTimeout?: number; // Connection timeout in ms
+  getExchangeName?: (eventType: string) => string;
+  getQueueName?: (eventType: string, queueName?: string) => string;
 }
 ```
 
@@ -232,6 +260,8 @@ interface MessageOptions {
   messageId?: string;
   timestamp?: number;
   [key: string]: any;
+  expiration?: string | number; // Message TTL
+  priority?: number; // 0-9 priority levels
 }
 
 // Options for subscribing to messages
@@ -241,6 +271,8 @@ interface SubscriptionOptions {
   durable?: boolean; // Whether the queue is durable (default: !!queueName)
   autoDelete?: boolean; // Whether the queue is auto-deleted (default: !queueName)
   prefetch?: number; // Prefetch count for this subscription
+  ackMode?: "auto" | "manual";
+  arguments?: any; // DLX configuration
   [key: string]: any;
 }
 ```
@@ -297,6 +329,62 @@ const orderSubscriptionId = await fastify.messaging.subscribe(
 
 // Unsubscribing
 await fastify.messaging.unsubscribe(subscriptionId);
+```
+
+## Advanced Features
+
+### Fanout Exchanges
+
+```typescript
+// Publisher
+await client.publishToFanout("system.alerts", {
+  severity: "critical",
+  message: "Server down!",
+});
+
+// Subscriber
+await client.subscribeToFanout(
+  "system.alerts",
+  (msg) => console.log("ALERT:", msg.content),
+  "alerts-queue"
+);
+```
+
+### Dead Letter Exchanges (DLX)
+
+```typescript
+await client.subscribeWithDLX(
+  "payment.process",
+  async (msg) => {
+    // Process payment
+  },
+  "payments_dlx",
+  "payments_dlx_queue",
+  {
+    queueName: "payments",
+    arguments: {
+      "x-message-ttl": 60000,
+      "x-dead-letter-exchange": "payments_dlx",
+    },
+  }
+);
+```
+
+### Event Handling
+
+```typescript
+client.on("connected", () => console.log("Connected to RabbitMQ"));
+client.on("error", (err) => console.error("RabbitMQ error:", err));
+client.on("reconnected", () => console.log("Reconnected successfully"));
+```
+
+### Graceful Shutdown
+
+```typescript
+process.on("SIGINT", async () => {
+  await client.gracefulShutdown(10000);
+  process.exit(0);
+});
 ```
 
 ## Topic Patterns (RabbitMQ)
@@ -459,6 +547,34 @@ try {
 }
 ```
 
+5. **Use DLX for Critical Messages**: Ensure message reliability with dead letter exchanges.
+
+6. **Manual Acknowledgments**: Use ackMode: 'manual' for guaranteed processing.
+
+7. **Priority Queues**: Implement message prioritization for urgent tasks.
+
+```typescript
+// Example priority message
+await client.publish("order.priority", orderData, {
+  priority: 9,
+  expiration: 3600000, // 1 hour TTL
+});
+
+// Example DLX configuration
+await client.subscribeWithDLX(
+  "invoice.generate",
+  processInvoice,
+  "invoice_dlx",
+  "invoice_dlx_queue"
+);
+```
+
+8. **Prefetch Tuning**: Adjust prefetch count based on consumer capacity.
+
+9. **Connection Monitoring**: Use event listeners for connection state management.
+
+10. **Structured Logging**: Utilize setLogLevel for production logging.
+
 ## Why Use This Package?
 
 - **Abstraction**: Decouples your application code from the specific message broker implementation
@@ -466,6 +582,10 @@ try {
 - **Simplicity**: Clean, intuitive API that's easy to use
 - **Reliability**: Built-in reconnection and error handling
 - **Type Safety**: Full TypeScript support with generics
+- **Enterprise-Ready Features**: DLX, priority queues, TTL, and more
+- **Production Resilience**: Automatic reconnection, graceful shutdown
+- **Enhanced Observability**: Connection events and configurable logging
+- **Flexible Patterns**: Support for both topic and fanout exchanges
 
 ## Contributing
 
