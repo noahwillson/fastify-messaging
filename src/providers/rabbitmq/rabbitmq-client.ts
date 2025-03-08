@@ -16,6 +16,9 @@ import {
 import { RabbitMQConfig, RabbitMQEvents } from "./types";
 import { EventEmitter } from "events";
 
+/**
+ * A client for interacting with a RabbitMQ message broker.
+ */
 export class RabbitMQClient extends MessagingClient {
   private connection: amqplib.Connection | null = null;
   private channel: amqplib.Channel | null = null;
@@ -37,10 +40,20 @@ export class RabbitMQClient extends MessagingClient {
     super(rabbitConfig);
   }
 
+  /**
+   * Registers a listener for a specific event.
+   * @param {RabbitMQEvents} event - The event to listen for.
+   * @param {(...args: any[]) => void} listener - The listener function to call when the event is emitted.
+   */
   public on(event: RabbitMQEvents, listener: (...args: any[]) => void): void {
-    this.rabbitEventEmitter.on(event, listener);
+    this.rabbitEventEmitter.on(event, listener); 
   }
 
+  /**
+   * Handles errors that occur during message processing.
+   * @param {Error} error - The error that occurred.
+   * @param {string} context - Additional context about where the error occurred.
+   */
   public handleError(error: Error, context: string): void {
     this.log("error", `${context}: ${error.message}`);
     this.rabbitEventEmitter.emit("error", error);
@@ -54,7 +67,8 @@ export class RabbitMQClient extends MessagingClient {
   }
 
   /**
-   * Set the logging level.
+   * Sets the logging level for the RabbitMQ client.
+   * @param {"info" | "warn" | "error"} level - The logging level to set.
    */
   public setLogLevel(level: "info" | "warn" | "error"): void {
     this.logLevel = level;
@@ -64,12 +78,13 @@ export class RabbitMQClient extends MessagingClient {
    * Log messages based on the current log level.
    */
   private log(level: "info" | "warn" | "error", message: string): void {
+    const timestamp = new Date().toISOString();
     if (
       this.logLevel === "info" ||
       (this.logLevel === "warn" && level !== "info") ||
       level === "error"
     ) {
-      console[level](`[RabbitMQClient] ${message}`);
+      console[level](`[${timestamp}] [RabbitMQClient] ${message}`);
     }
   }
 
@@ -77,7 +92,17 @@ export class RabbitMQClient extends MessagingClient {
    * Generate or use a specified exchange name.
    */
   private getExchangeName(eventType?: string): string {
+    if (this.rabbitConfig.getExchangeName) {
+      return this.rabbitConfig.getExchangeName(eventType || "");
+    }
     return eventType ? `events.${eventType}` : this.rabbitConfig.exchange;
+  }
+
+  private getQueueName(eventType: string, queueName?: string): string {
+    if (this.rabbitConfig.getQueueName) {
+      return this.rabbitConfig.getQueueName(eventType, queueName);
+    }
+    return queueName || `${eventType}.queue`;
   }
 
   /**
@@ -131,6 +156,7 @@ export class RabbitMQClient extends MessagingClient {
     }
 
     const exchangeName = this.getExchangeName(eventType);
+    const dynamicQueueName = this.getQueueName(eventType, queueName);
     const { queue } = await this.channel.assertQueue(queueName, {
       exclusive: false,
       durable: true,
@@ -167,6 +193,11 @@ export class RabbitMQClient extends MessagingClient {
     return consumerTag;
   }
 
+  /**
+   * Connects to the RabbitMQ server.
+   * @returns {Promise<void>} A promise that resolves when the connection is established.
+   * @throws {Error} Throws an error if the connection fails.
+   */
   public async connect(): Promise<void> {
     if (this.connection || this.connecting) {
       return;
@@ -214,6 +245,15 @@ export class RabbitMQClient extends MessagingClient {
     }
   }
 
+  /**
+   * Publishes a message to a specified topic.
+   * @param {string} topic - The topic to which the message will be published.
+   * @param {T} message - The message to publish.
+   * @param {MessageOptions} [options={}] - Additional options for the message (e.g., TTL, priority).
+   * @param {string} [eventType] - Optional event type for categorizing the message.
+   * @returns {Promise<boolean>} A promise that resolves to true if the message was published successfully, otherwise false.
+   * @throws {Error} Throws an error if the publishing fails.
+   */
   public async publish<T>(
     topic: string,
     message: T,
@@ -244,6 +284,14 @@ export class RabbitMQClient extends MessagingClient {
     }
   }
 
+  /**
+   * Subscribes to a specified topic.
+   * @param {string} topic - The topic to subscribe to.
+   * @param {MessageHandler<T>} handler - The callback function to handle incoming messages.
+   * @param {SubscriptionOptions} [options={ ackMode: 'manual' }] - Options for the subscription, including acknowledgment mode.
+   * @returns {Promise<string>} A promise that resolves to a subscription ID.
+   * @throws {Error} Throws an error if the subscription fails.
+   */
   public async subscribe<T>(
     topic: string,
     handler: MessageHandler<T>,
@@ -264,7 +312,9 @@ export class RabbitMQClient extends MessagingClient {
       const subscriptionId = uuidv4();
 
       // Create a queue
-      const queueName = options.queueName || "";
+      const queueName = this.getQueueName(topic, options.queueName);
+
+      // Create a queue
       const { queue: queueCreated } = await this.channel.assertQueue(
         queueName,
         {
@@ -331,7 +381,8 @@ export class RabbitMQClient extends MessagingClient {
       await this.channel.bindQueue(dlxQueue, dlxExchange, "");
 
       // Create main queue with DLX settings
-      const queueName = options.queueName || "";
+      const queueName = this.getQueueName(topic, options.queueName);
+
       const { queue: queueCreated } = await this.channel.assertQueue(
         queueName,
         {
@@ -417,6 +468,7 @@ export class RabbitMQClient extends MessagingClient {
 
     const waitForMessages = new Promise<void>((resolve) => {
       const interval = setInterval(() => {
+        this.log("info", `In-progress messages: ${this.inProgressMessages}`);
         if (this.inProgressMessages === 0) {
           clearInterval(interval);
           resolve();
