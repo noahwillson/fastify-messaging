@@ -1,11 +1,12 @@
 name: Publish to NPM
 
 on:
-  release:
-    types: [created] # Triggers when a new GitHub Release is published
+  push:
+    tags:
+      - "v*" # Runs when pushing a tag like "v1.2.0"
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
 
     steps:
@@ -25,6 +26,17 @@ jobs:
         run: npm run build # Remove if unnecessary
 
       - name: Publish to NPM
-        run: npm publish
+        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: "Automated release of ${{ github.ref_name }}"
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
