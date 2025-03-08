@@ -8,6 +8,18 @@ export interface RabbitMQConfig extends MessagingConfig {
   vhost?: string;
   heartbeat?: number;
   connectionTimeout?: number;
+  getExchangeName?: (eventType: string) => string;
+  getQueueName?: (eventType: string, queueName?: string) => string;
+  queueOptions?: {
+    durable?: boolean;
+    exclusive?: boolean;
+    autoDelete?: boolean;
+    arguments?: any;
+  };
+  exchangeOptions?: {
+    alternateExchange?: string;
+    arguments?: any;
+  };
 }
 
 export type RabbitMQEvents =
