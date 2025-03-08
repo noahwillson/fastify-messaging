@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.1.1
+
+### Patch Changes
+
+- ef16357: Added the newfeatures to the documentation
+
 ## 1.1.0
 
 ### Minor Changes
