@@ -1,3 +1,5 @@
+import { ConsumeMessage } from "amqplib";
+
 export interface MessageOptions {
   headers?: Record<string, string | number | boolean>;
   contentType?: string;
@@ -16,7 +18,12 @@ export interface Message<T = any> {
   content: T;
   routingKey: string;
   options?: MessageOptions;
-  originalMessage?: any; // Provider-specific message object
+  originalMessage?: ConsumeMessage; // Provider-specific message object
+  timestamp?: Date;
+  messageId?: string;
+  ack(): Promise<void>;
+  nack(requeue?: boolean): Promise<void>;
+  reject(requeue?: boolean): Promise<void>;
 }
 
 export interface SubscriptionOptions {
@@ -25,8 +32,19 @@ export interface SubscriptionOptions {
   durable?: boolean;
   autoDelete?: boolean;
   prefetch?: number;
-  arguments?: any; // RabbitMQ-specific queue arguments
-  [key: string]: any;
+  ackMode: "auto" | "manual";
+  arguments?: {
+    "x-message-ttl"?: number;
+    "x-expires"?: number;
+    "x-max-length"?: number;
+    "x-max-length-bytes"?: number;
+    "x-overflow"?: "drop-head" | "reject-publish";
+    "x-dead-letter-exchange"?: string;
+    "x-dead-letter-routing-key"?: string;
+    "x-single-active-consumer"?: boolean;
+    "x-max-priority"?: number;
+    [key: string]: any;
+  };
 }
 
 export interface MessageHandler<T = any> {
@@ -39,21 +57,37 @@ export interface MessagingConfig {
   exchangeType?: "direct" | "topic" | "fanout" | "headers";
   prefetch?: number;
   reconnectInterval?: number;
+  vhost?: string;
+  heartbeat?: number;
+  connectionTimeout?: number;
   queueOptions?: {
     durable?: boolean;
     exclusive?: boolean;
     autoDelete?: boolean;
-    arguments?: any;
+    arguments?: Record<string, unknown>;
   };
   exchangeOptions?: {
     alternateExchange?: string;
-    arguments?: any;
+    arguments?: Record<string, unknown>;
+    durable?: boolean;
+    internal?: boolean;
+    autoDelete?: boolean;
   };
-  serialize?: (message: any) => Buffer;
-  deserialize?: (buffer: Buffer) => any;
   [key: string]: any;
 }
 
 export interface FanoutSubscriptionOptions extends SubscriptionOptions {
   eventType: string; // Event type for fanout exchange
 }
+
+export interface MessageResponse {
+  success: boolean;
+  error?: Error;
+  messageId?: string;
+}
+
+export type ConnectionStatus =
+  | "connected"
+  | "disconnected"
+  | "connecting"
+  | "error";
