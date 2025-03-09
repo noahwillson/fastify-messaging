@@ -33,11 +33,13 @@ export class RabbitMQClient extends MessagingClient {
     }
   > = new Map();
   private reconnectCallback: (() => void) | null = null;
-  private rabbitEventEmitter = new EventEmitter();
+  private rabbitEventEmitter: EventEmitter = new EventEmitter();
   private logLevel: "info" | "warn" | "error" = "info";
+  protected config: RabbitMQConfig;
 
   constructor(private rabbitConfig: RabbitMQConfig) {
     super(rabbitConfig);
+    this.config = rabbitConfig;
   }
 
   /**
@@ -46,7 +48,7 @@ export class RabbitMQClient extends MessagingClient {
    * @param {(...args: any[]) => void} listener - The listener function to call when the event is emitted.
    */
   public on(event: RabbitMQEvents, listener: (...args: any[]) => void): void {
-    this.rabbitEventEmitter.on(event, listener); 
+    this.rabbitEventEmitter.on(event, listener);
   }
 
   /**
@@ -56,7 +58,7 @@ export class RabbitMQClient extends MessagingClient {
    */
   public handleError(error: Error, context: string): void {
     this.log("error", `${context}: ${error.message}`);
-    this.rabbitEventEmitter.emit("error", error);
+    this.rabbitEventEmitter.emit("error", error as Error);
   }
 
   /**
@@ -523,19 +525,36 @@ export class RabbitMQClient extends MessagingClient {
             timestamp: msg.properties.timestamp,
           },
           originalMessage: msg,
+          timestamp: new Date(msg.properties.timestamp),
+          messageId: msg.properties.messageId,
+          ack: async () => {
+            if (ackMode === "manual" && this.channel) {
+              await this.channel.ack(msg);
+            }
+          },
+          nack: async (requeue: boolean = true) => {
+            if (ackMode === "manual" && this.channel) {
+              await this.channel.nack(msg, false, requeue);
+            }
+          },
+          reject: async (requeue: boolean = false) => {
+            if (ackMode === "manual" && this.channel) {
+              await this.channel.reject(msg, requeue);
+            }
+          },
         };
 
         // Execute the handler
         await Promise.resolve(handler(message));
 
         // Acknowledge the message
-        if (ackMode === "manual") {
+        if (ackMode === "auto" && this.channel) {
           this.channel.ack(msg); // Manually acknowledge the message
         }
       } catch (error: any) {
-        this.handleError(error, "Error processing message");
+        this.handleError(error as Error, "Error processing message");
         // Reject the message and requeue it
-        if (ackMode === "manual") {
+        if (ackMode === "manual" && this.channel) {
           this.channel.nack(msg, false, true); // Requeue the message
         }
       } finally {
