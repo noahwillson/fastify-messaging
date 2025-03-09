@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.1.2
+
+### Patch Changes
+
+- 0c5e4b6: minor changes to add ack
+
 ## 1.1.1
 
 ### Patch Changes
