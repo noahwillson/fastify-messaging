@@ -31,12 +31,19 @@ async function start() {
   const subscriptionId = await fastify.messaging.subscribe<OrderCreatedEvent>(
     "order.created",
     async (message) => {
-      fastify.log.info(`Order created: ${message.content.id}`);
+      try {
+        fastify.log.info(`Order created: ${message.content.id}`);
+        await message.ack();
+      } catch (error) {
+        fastify.log.error(`Error processing message: ${error}`);
+        await message.nack(true);
+      }
       // Process the order...
     },
     {
       queueName: "order-service-queue", // Optional: named queue for persistent subscriptions
       durable: true,
+      ackMode: "manual",
     }
   );
 
