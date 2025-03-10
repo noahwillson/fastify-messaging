@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.1.3
+
+### Patch Changes
+
+- d42906a: Fix: Add more types
+
 ## 1.1.2
 
 ### Patch Changes
