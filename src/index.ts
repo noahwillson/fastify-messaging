@@ -5,6 +5,7 @@ export {
   MessageOptions,
   MessagingConfig,
   SubscriptionOptions,
+  PublishFunction,
 } from "./core/types";
 export {
   MessagingError,
