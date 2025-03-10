@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.2.0
+
+### Minor Changes
+
+- cf3cddb: support for dlx
+
 ## 1.1.3
 
 ### Patch Changes
