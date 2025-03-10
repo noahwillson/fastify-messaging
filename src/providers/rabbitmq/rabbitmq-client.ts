@@ -30,6 +30,10 @@ export class RabbitMQClient extends MessagingClient {
       handler: MessageHandler;
       consumerTag?: string;
       queueName?: string;
+      type: "standard" | "fanout" | "dlx";
+      dlxExchange?: string;
+      dlxQueue?: string;
+      options?: SubscriptionOptions;
     }
   > = new Map();
   private reconnectCallback: (() => void) | null = null;
@@ -38,8 +42,14 @@ export class RabbitMQClient extends MessagingClient {
   protected config: RabbitMQConfig;
 
   constructor(private rabbitConfig: RabbitMQConfig) {
-    super(rabbitConfig);
-    this.config = rabbitConfig;
+    super({
+      reconnectInterval: 5000,
+      ...rabbitConfig,
+    });
+    this.config = {
+      reconnectInterval: 5000,
+      ...rabbitConfig,
+    };
   }
 
   /**
@@ -49,6 +59,15 @@ export class RabbitMQClient extends MessagingClient {
    */
   public on(event: RabbitMQEvents, listener: (...args: any[]) => void): void {
     this.rabbitEventEmitter.on(event, listener);
+  }
+
+  /**
+   * Removes a listener for a specific event.
+   * @param {RabbitMQEvents} event - The event to stop listening for.
+   * @param {(...args: any[]) => void} listener - The listener function to remove.
+   */
+  public off(event: RabbitMQEvents, listener: (...args: any[]) => void): void {
+    this.rabbitEventEmitter.off(event, listener);
   }
 
   /**
@@ -159,10 +178,10 @@ export class RabbitMQClient extends MessagingClient {
 
     const exchangeName = this.getExchangeName(eventType);
     const dynamicQueueName = this.getQueueName(eventType, queueName);
-    const { queue } = await this.channel.assertQueue(queueName, {
-      exclusive: false,
-      durable: true,
-      autoDelete: false,
+    const { queue } = await this.channel.assertQueue(dynamicQueueName, {
+      exclusive: !queueName,
+      durable: !!queueName,
+      autoDelete: !queueName,
       ...queueOptions,
     });
 
@@ -183,16 +202,65 @@ export class RabbitMQClient extends MessagingClient {
       ackMode: "manual",
     }
   ): Promise<string> {
+    const subscriptionId = uuidv4();
+
     const queue = await this.createDynamicQueue(eventType, queueName);
 
     // Start consuming messages
     const { consumerTag } = await this.channel!.consume(
       queue,
-      this.createMessageHandler(eventType, handler, options.ackMode),
+      this.createMessageHandler(subscriptionId, handler, options.ackMode),
       { noAck: options.ackMode === "auto" }
     );
 
-    return consumerTag;
+    // Store subscription with unique ID
+    this.subscriptions.set(subscriptionId, {
+      topic: eventType,
+      handler,
+      consumerTag,
+      queueName: queue,
+      type: "fanout",
+      options,
+    });
+
+    return subscriptionId;
+  }
+
+  /**
+   * Sets up a dead letter exchange and queue, if configured.
+   * If no DLX is configured, this method does nothing.
+   * @private
+   */
+  private async setupDeadLetterExchange(): Promise<void> {
+    if (!this.channel || !this.config.deadLetterExchange) {
+      return;
+    }
+
+    // Create the Dead Letter Exchange
+    await this.channel.assertExchange(
+      this.config.deadLetterExchange,
+      "fanout",
+      { durable: true }
+    );
+
+    // Create the Dead Letter Queue if configured
+    if (this.config.deadLetterQueue) {
+      await this.channel.assertQueue(this.config.deadLetterQueue, {
+        durable: true,
+      });
+
+      // Bind the DLQ to the DLX
+      await this.channel.bindQueue(
+        this.config.deadLetterQueue,
+        this.config.deadLetterExchange,
+        "" // Empty routing key for fanout exchange
+      );
+    }
+
+    this.log(
+      "info",
+      `Dead Letter Exchange setup complete: ${this.config.deadLetterExchange}`
+    );
   }
 
   /**
@@ -209,7 +277,11 @@ export class RabbitMQClient extends MessagingClient {
       this.connecting = true;
 
       // Use the correct connect method
-      const conn = await amqplib.connect(this.rabbitConfig.url);
+      const conn = await amqplib.connect(this.rabbitConfig.url, {
+        heartbeat: this.rabbitConfig.heartbeat || 60,
+        vhost: this.rabbitConfig.vhost || "/",
+        timeout: this.rabbitConfig.connectionTimeout,
+      });
       this.connection = conn;
 
       // Create channel
@@ -217,7 +289,8 @@ export class RabbitMQClient extends MessagingClient {
       this.channel = ch;
 
       // Set prefetch count
-      await ch.prefetch(this.rabbitConfig.prefetch || 10);
+      const prefetch = Math.max(1, this.rabbitConfig.prefetch || 10);
+      await ch.prefetch(prefetch);
 
       // Create exchange
       await ch.assertExchange(
@@ -225,6 +298,10 @@ export class RabbitMQClient extends MessagingClient {
         this.rabbitConfig.exchangeType || "topic",
         { durable: true, ...this.rabbitConfig.exchangeOptions }
       );
+
+      if (this.config.deadLetterExchange) {
+        await this.setupDeadLetterExchange();
+      }
 
       // Setup connection event handlers
       conn.on("error", this.handleConnectionError.bind(this));
@@ -316,6 +393,21 @@ export class RabbitMQClient extends MessagingClient {
       // Create a queue
       const queueName = this.getQueueName(topic, options.queueName);
 
+      const queueArguments = {
+        ...options.arguments,
+      };
+
+      // Add Dead Letter Exchange configuration if enabled
+      if (
+        this.config.deadLetterExchange &&
+        queueName !== this.config.deadLetterQueue &&
+        !topic.startsWith("failed.")
+      ) {
+        queueArguments["x-dead-letter-exchange"] =
+          this.config.deadLetterExchange;
+        queueArguments["x-dead-letter-routing-key"] = `failed.${topic}`;
+      }
+
       // Create a queue
       const { queue: queueCreated } = await this.channel.assertQueue(
         queueName,
@@ -323,7 +415,7 @@ export class RabbitMQClient extends MessagingClient {
           exclusive: options.exclusive ?? !options.queueName,
           durable: options.durable ?? !!options.queueName,
           autoDelete: options.autoDelete ?? !options.queueName,
-          arguments: options.arguments,
+          arguments: queueArguments,
         }
       );
 
@@ -347,6 +439,8 @@ export class RabbitMQClient extends MessagingClient {
         handler: handler as MessageHandler,
         consumerTag,
         queueName: queueCreated,
+        type: "standard",
+        options,
       });
 
       return subscriptionId;
@@ -357,6 +451,16 @@ export class RabbitMQClient extends MessagingClient {
     }
   }
 
+  /**
+   * Subscribes to a specified topic and enables Dead Letter Exchange (DLX) for failed messages.
+   * @param {string} topic - The topic to subscribe to.
+   * @param {MessageHandler<T>} handler - The callback function to handle incoming messages.
+   * @param {string} dlxExchange - The name of the dead letter exchange.
+   * @param {string} dlxQueue - The name of the dead letter queue.
+   * @param {SubscriptionOptions} [options={ ackMode: 'manual' }] - Options for the subscription, including acknowledgment mode.
+   * @returns {Promise<string>} A promise that resolves to a subscription ID.
+   * @throws {Error} Throws an error if the subscription fails.
+   */
   public async subscribeWithDLX<T>(
     topic: string,
     handler: MessageHandler<T>,
@@ -366,6 +470,8 @@ export class RabbitMQClient extends MessagingClient {
       ackMode: "manual",
     }
   ): Promise<string> {
+    const subscriptionId = uuidv4();
+
     if (!this.channel) {
       await this.connect();
     }
@@ -392,7 +498,9 @@ export class RabbitMQClient extends MessagingClient {
           durable: options.durable ?? !!options.queueName,
           autoDelete: options.autoDelete ?? !options.queueName,
           arguments: {
+            ...(options.arguments || {}),
             "x-dead-letter-exchange": dlxExchange, // Route failed messages to DLX
+            "x-dead-letter-routing-key": dlxQueue,
           },
         }
       );
@@ -407,19 +515,23 @@ export class RabbitMQClient extends MessagingClient {
       // Start consuming messages
       const { consumerTag } = await this.channel.consume(
         queueCreated,
-        this.createMessageHandler(uuidv4(), handler, options.ackMode),
+        this.createMessageHandler(subscriptionId, handler, options.ackMode),
         { noAck: options.ackMode === "auto" }
       );
 
       // Store the subscription
-      this.subscriptions.set(consumerTag, {
+      this.subscriptions.set(subscriptionId, {
         topic,
         handler: handler as MessageHandler,
         consumerTag,
         queueName: queueCreated,
+        type: "dlx",
+        dlxExchange,
+        dlxQueue,
+        options,
       });
 
-      return consumerTag;
+      return subscriptionId;
     } catch (error: any) {
       throw new SubscriptionError(
         `Failed to subscribe to topic ${topic}: ${error.message}`
@@ -427,6 +539,11 @@ export class RabbitMQClient extends MessagingClient {
     }
   }
 
+  /**
+   * Unsubscribe from a previously subscribed topic.
+   * @param subscriptionId - The ID of the subscription to unsubscribe from
+   * @throws {SubscriptionError} If the subscription ID is invalid or unsubscribing fails
+   */
   public async unsubscribe(subscriptionId: string): Promise<void> {
     if (!this.channel) {
       return;
@@ -445,6 +562,12 @@ export class RabbitMQClient extends MessagingClient {
     }
   }
 
+  /**
+   * Closes the connection to RabbitMQ, releasing all resources.
+   *
+   * This method is idempotent; it will not throw an error if the connection
+   * is already closed.
+   */
   public async close(): Promise<void> {
     if (this.channel) {
       try {
@@ -465,39 +588,89 @@ export class RabbitMQClient extends MessagingClient {
     }
   }
 
+  /**
+   * Gracefully shuts down the RabbitMQ client.
+   *
+   * Initiates a graceful shutdown process by first checking for any in-progress messages.
+   * If there are messages being processed, it waits for them to complete or until the
+   * specified timeout is reached. Once all messages are processed or timeout occurs,
+   * it closes the channel and connection to RabbitMQ. Logs the shutdown process and
+   * handles any errors that occur during the shutdown.
+   *
+   * @param timeout - The maximum time in milliseconds to wait for in-progress messages
+   *                  to complete before forcing a shutdown. Defaults to 5000ms.
+   * @returns A promise that resolves when the shutdown process completes.
+   */
+
   public async gracefulShutdown(timeout: number = 5000): Promise<void> {
+    if (!this.connection) return;
+
     this.log("info", "Shutting down gracefully...");
 
-    const waitForMessages = new Promise<void>((resolve) => {
-      const interval = setInterval(() => {
-        this.log("info", `In-progress messages: ${this.inProgressMessages}`);
-        if (this.inProgressMessages === 0) {
-          clearInterval(interval);
-          resolve();
-        }
-      }, 100);
-    });
+    if (this.inProgressMessages > 0) {
+      this.log(
+        "info",
+        `Waiting for ${this.inProgressMessages} messages to complete...`
+      );
 
-    await Promise.race([
-      waitForMessages,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Shutdown timeout")), timeout)
-      ),
-    ]);
-
-    if (this.channel) {
-      await this.channel.close();
-      this.channel = null;
+      try {
+        await Promise.race([
+          // Wait for in-progress messages to complete
+          new Promise<void>((resolve) => {
+            const checkInterval = setInterval(() => {
+              if (this.inProgressMessages === 0) {
+                clearInterval(checkInterval);
+                resolve();
+              }
+            }, 100);
+          }),
+          // Or timeout
+          new Promise<void>((_, reject) => {
+            setTimeout(() => {
+              reject(new Error("Shutdown timeout exceeded"));
+            }, timeout);
+          }),
+        ]);
+      } catch (error) {
+        this.log(
+          "warn",
+          `Shutdown timed out after ${timeout}ms, forcing close.`
+        );
+        // Continue with shutdown even after timeout
+      }
     }
 
-    if (this.connection) {
-      await this.connection.close();
+    try {
+      if (this.channel) {
+        await this.channel.close();
+      }
+      if (this.connection) {
+        await this.connection.close();
+      }
+    } catch (error) {
+      this.handleError(
+        error instanceof Error ? error : new Error(String(error)),
+        "Error during graceful shutdown"
+      );
+    } finally {
+      this.channel = null;
       this.connection = null;
     }
   }
 
   private inProgressMessages = 0;
 
+  /**
+   * Creates a message handler for a subscription.
+   *
+   * @param subscriptionId - The ID of the subscription.
+   * @param handler - The callback function to handle incoming messages.
+   * @param ackMode - The acknowledgment mode for the subscription. If set to "auto",
+   *                 the message is acknowledged automatically after the handler
+   *                 completes. If set to "manual", the message is not acknowledged
+   *                 until the handler explicitly acknowledges it.
+   * @returns A function that processes incoming messages and handles errors.
+   */
   private createMessageHandler<T>(
     subscriptionId: string,
     handler: MessageHandler<T>,
@@ -555,7 +728,39 @@ export class RabbitMQClient extends MessagingClient {
         this.handleError(error as Error, "Error processing message");
         // Reject the message and requeue it
         if (ackMode === "manual" && this.channel) {
-          this.channel.nack(msg, false, true); // Requeue the message
+          if (this.config.deadLetterExchange) {
+            try {
+              // Clone the message with error details
+              const errorMsg = Buffer.from(msg.content);
+              const errorHeaders = { ...(msg.properties.headers || {}) };
+
+              // Add error details to headers
+              errorHeaders["x-error"] = error.message;
+              errorHeaders["x-error-stack"] = error.stack;
+              errorHeaders["x-original-routing-key"] = msg.fields.routingKey;
+              errorHeaders["x-failed-at"] = new Date().toISOString();
+
+              // Publish directly to DLX with updated headers
+              await this.channel.publish(
+                this.config.deadLetterExchange,
+                `failed.${msg.fields.routingKey}`,
+                errorMsg,
+                {
+                  ...msg.properties,
+                  headers: errorHeaders,
+                }
+              );
+
+              // Acknowledge the original message
+              await this.channel.ack(msg);
+            } catch (publishError) {
+              // If direct publishing fails, fall back to reject
+              this.channel.reject(msg, false);
+            }
+          } else {
+            // No DLX, use regular nack
+            this.channel.nack(msg, false, true);
+          }
         }
       } finally {
         this.inProgressMessages--;
@@ -579,7 +784,13 @@ export class RabbitMQClient extends MessagingClient {
     }
   }
 
+  private reconnecting = false;
+
   private scheduleReconnect(): void {
+    if (this.reconnecting) return;
+
+    this.reconnecting = true;
+
     setTimeout(async () => {
       this.log("info", "Attempting to reconnect to RabbitMQ...");
       try {
@@ -591,6 +802,8 @@ export class RabbitMQClient extends MessagingClient {
       } catch (error) {
         this.log("error", `Failed to reconnect to RabbitMQ: ${error}`);
         this.scheduleReconnect(); // Retry reconnection
+      } finally {
+        this.reconnecting = false;
       }
     }, this.config.reconnectInterval);
   }
@@ -601,17 +814,32 @@ export class RabbitMQClient extends MessagingClient {
     // Clear existing subscriptions since we'll recreate them
     this.subscriptions.clear();
 
-    for (const [id, { topic, handler, queueName }] of subscriptions) {
+    for (const [id, sub] of subscriptions) {
       try {
-        // Resubscribe with the same handler and queue name if available
-        await this.subscribe(topic, handler, {
-          queueName,
-          durable: !!queueName,
-          autoDelete: !queueName,
-          ackMode: "manual",
-        });
+        if (sub.type === "dlx" && sub.dlxExchange && sub.dlxQueue) {
+          await this.subscribeWithDLX(
+            sub.topic,
+            sub.handler,
+            sub.dlxExchange,
+            sub.dlxQueue,
+            sub.options as SubscriptionOptions & { ackMode: "auto" | "manual" }
+          );
+        } else if (sub.type === "fanout" && sub.queueName) {
+          await this.subscribeToFanout(
+            sub.topic,
+            sub.handler,
+            sub.queueName,
+            sub.options as SubscriptionOptions & { ackMode: "auto" | "manual" }
+          );
+        } else {
+          await this.subscribe(
+            sub.topic,
+            sub.handler,
+            sub.options as SubscriptionOptions & { ackMode: "auto" | "manual" }
+          );
+        }
       } catch (error) {
-        this.log("error", `Failed to resubscribe to ${topic}: ${error}`);
+        this.log("error", `Failed to resubscribe to ${sub.topic}: ${error}`);
       }
     }
   }

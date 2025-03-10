@@ -28,10 +28,11 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
 9. [Error Handling](#error-handling)
 10. [Creating a Custom Provider](#creating-a-custom-provider)
 11. [Best Practices](#best-practices)
-12. [Why Use This Package?](#why-use-this-package)
-13. [Contributing](#contributing)
-14. [License](#license)
-15. [Acknowledgments](#acknowledgments)
+12. [Important Updates and Best Practices](#important-updates-and-best-practices)
+13. [Why Use This Package?](#why-use-this-package)
+14. [Contributing](#contributing)
+15. [License](#license)
+16. [Acknowledgments](#acknowledgments)
 
 ## Features
 
@@ -79,6 +80,19 @@ async function start() {
     url: process.env.RABBITMQ_URL || "amqp://localhost",
     exchange: "events",
     exchangeType: "topic",
+    prefetch: 10,
+    heartbeat: 60,
+    deadLetterExchange: "events.dlx",
+    deadLetterQueue: "events.dlq",
+  });
+
+  // Set up event handlers BEFORE registering the plugin
+  messagingClient.on("connected", () => {
+    fastify.log.info("Connected to RabbitMQ");
+  });
+
+  messagingClient.on("error", (error) => {
+    fastify.log.error("RabbitMQ error:", error);
   });
 
   // Register the messaging plugin
@@ -90,21 +104,27 @@ async function start() {
   fastify.post("/orders", async (request, reply) => {
     const order = request.body as any;
 
-    // Publish event
-    await fastify.messaging.publish("order.created", {
-      id: order.id,
-      customerId: order.customerId,
-      amount: order.amount,
-      timestamp: new Date().toISOString(),
-    });
+    try {
+      // Publish event with proper error handling
+      await fastify.messaging.publish("order.created", {
+        id: order.id,
+        customerId: order.customerId,
+        amount: order.amount,
+        timestamp: new Date().toISOString(),
+      });
 
-    return { success: true, orderId: order.id };
+      return { success: true, orderId: order.id };
+    } catch (error) {
+      fastify.log.error("Failed to publish order event:", error);
+      reply.code(500);
+      return { success: false, error: "Failed to process order" };
+    }
   });
 
   await fastify.listen({ port: 3000 });
 }
 
-start();
+start().catch(console.error);
 ```
 
 ### Consumer Service
@@ -128,6 +148,19 @@ async function start() {
     url: process.env.RABBITMQ_URL || "amqp://localhost",
     exchange: "events",
     exchangeType: "topic",
+    prefetch: 10,
+    heartbeat: 60,
+    deadLetterExchange: "events.dlx",
+    deadLetterQueue: "events.dlq",
+  });
+
+  // Set up event handlers BEFORE registering the plugin
+  messagingClient.on("connected", () => {
+    fastify.log.info("Connected to RabbitMQ");
+  });
+
+  messagingClient.on("error", (error) => {
+    fastify.log.error("RabbitMQ error:", error);
   });
 
   // Register the messaging plugin
@@ -139,19 +172,58 @@ async function start() {
   const subscriptionId = await fastify.messaging.subscribe<OrderCreatedEvent>(
     "order.created",
     async (message) => {
-      fastify.log.info(`Order created: ${message.content.id}`);
-      // Process the order...
+      try {
+        const order = message.content;
+        fastify.log.info(
+          `Processing order ${order.id} for customer ${order.customerId}`
+        );
+
+        // Process the order...
+
+        // Acknowledge successful processing
+        await message.ack();
+      } catch (error) {
+        fastify.log.error("Error processing order:", error);
+
+        // Choose appropriate action based on error type
+        if (error.name === "ValidationError") {
+          // Don't requeue for data validation errors
+          await message.nack(false);
+        } else {
+          // Requeue for possible transient errors
+          await message.nack(true);
+        }
+      }
     },
     {
       queueName: "order-service-queue",
       durable: true,
+      ackMode: "manual",
+    }
+  );
+
+  // Handle DLX messages (failed messages)
+  await fastify.messaging.subscribe(
+    "failed.order.created",
+    async (message) => {
+      const headers = message.options?.headers || {};
+      fastify.log.warn(`Processing failed order: ${message.content.id}`);
+      fastify.log.warn(`Error reason: ${headers["x-error"]}`);
+
+      // Process failed message (store in DB, alert, etc.)
+      await message.ack();
+    },
+    {
+      queueName: "events.dlq",
+      durable: true,
+      ackMode: "manual",
     }
   );
 
   await fastify.listen({ port: 3001 });
 }
 
-start();
+start().catch(console.error);
 ```
 
 ## API Reference
@@ -574,6 +646,94 @@ await client.subscribeWithDLX(
 9. **Connection Monitoring**: Use event listeners for connection state management.
 
 10. **Structured Logging**: Utilize setLogLevel for production logging.
+
+## Important Updates and Best Practices
+
+### Connection Event Handling
+
+Always set up event listeners BEFORE connecting or registering the plugin:
+
+```typescript
+// Create client
+const messagingClient = new RabbitMQClient({...});
+
+// Set up event handlers FIRST
+messagingClient.on("connected", () => {...});
+messagingClient.on("error", (error) => {...});
+
+// THEN register plugin or connect
+await fastify.register(fastifyMessaging, { client: messagingClient });
+// OR
+await messagingClient.connect();
+```
+
+### Dead Letter Exchange Configuration
+
+Configure DLX through client options for automatic setup:
+
+```typescript
+const client = new RabbitMQClient({
+  // Basic configuration
+  url: "amqp://localhost",
+  exchange: "events",
+
+  // DLX configuration - all subscriptions will use this
+  deadLetterExchange: "events.dlx",
+  deadLetterQueue: "events.dlq",
+});
+```
+
+### Error Handling Best Practices
+
+Use proper error handling with typed acknowledgments:
+
+```typescript
+try {
+  // Process message
+  await message.ack();
+} catch (error) {
+  if (error instanceof ValidationError) {
+    // Don't requeue invalid messages
+    await message.nack(false);
+  } else {
+    // Requeue for transient errors
+    await message.nack(true);
+  }
+}
+```
+
+### Reconnection Handling
+
+```typescript
+client.onReconnect(async () => {
+  console.log("Reconnected to RabbitMQ");
+  // Implement custom reconnection logic
+  await retryBufferedMessages();
+});
+```
+
+### Message Type Safety
+
+Use TypeScript generics for type-safe messaging:
+
+```typescript
+interface OrderEvent {
+  id: string;
+  amount: number;
+}
+
+// Type-safe publishing
+await client.publish<OrderEvent>("order.created", {
+  id: "123",
+  amount: 99.99,
+});
+
+// Type-safe subscription
+await client.subscribe<OrderEvent>("order.created", (message) => {
+  // message.content is typed as OrderEvent
+  console.log(message.content.amount);
+});
+```
 
 ## Why Use This Package?
 
