@@ -16,6 +16,7 @@ import { EventEmitter } from "events";
 export abstract class MessagingClient {
   protected config: MessagingConfig;
   private eventEmitter = new EventEmitter();
+  protected connection: any | null = null;
 
   constructor(config: MessagingConfig) {
     this.config = {
@@ -34,6 +35,14 @@ export abstract class MessagingClient {
     listener: (...args: any[]) => void
   ): void {
     this.eventEmitter.on(event, listener);
+  }
+
+  /**
+   * Check if the client is currently connected to the messaging system.
+   * @returns {boolean} True if the client is connected, false otherwise.
+   */
+  public isConnected(): boolean {
+    return this.connection !== null;
   }
 
   /**
