@@ -16,6 +16,8 @@ export interface RabbitMQConfig extends MessagingConfig {
     autoDelete?: boolean;
     arguments?: any;
   };
+  deadLetterExchange?: string;
+  deadLetterQueue?: string;
   exchangeOptions?: {
     alternateExchange?: string;
     arguments?: any;
