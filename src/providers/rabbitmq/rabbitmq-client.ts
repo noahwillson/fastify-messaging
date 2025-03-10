@@ -20,7 +20,7 @@ import { EventEmitter } from "events";
  * A client for interacting with a RabbitMQ message broker.
  */
 export class RabbitMQClient extends MessagingClient {
-  private connection: amqplib.Connection | null = null;
+  protected connection: amqplib.Connection | null = null;
   private channel: amqplib.Channel | null = null;
   private connecting = false;
   private subscriptions: Map<
