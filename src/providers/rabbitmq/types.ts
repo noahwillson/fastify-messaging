@@ -8,6 +8,9 @@ export interface RabbitMQConfig extends MessagingConfig {
   vhost?: string;
   heartbeat?: number;
   connectionTimeout?: number;
+  maxReconnectAttempts?: number;
+  reconnectBackoffMultiplier?: number;
+  maxReconnectDelay?: number;
   getExchangeName?: (eventType: string) => string;
   getQueueName?: (eventType: string, queueName?: string) => string;
   queueOptions?: {
