@@ -10,6 +10,7 @@ export interface MessageOptions {
   correlationId?: string;
   replyTo?: string;
   messageId?: string;
+  ttl?: number | string;
   timestamp?: number;
   [key: string]: any;
 }
