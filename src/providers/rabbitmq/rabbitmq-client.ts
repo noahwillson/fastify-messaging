@@ -40,6 +40,9 @@ export class RabbitMQClient extends MessagingClient {
   private rabbitEventEmitter: EventEmitter = new EventEmitter();
   private logLevel: "info" | "warn" | "error" = "info";
   protected config: RabbitMQConfig;
+  private reconnectAttempts: number = 0;
+  private maxReconnectAttempts: number = 10; // Add maximum reconnection attempts
+  private reconnectTimeout?: NodeJS.Timeout;
 
   constructor(private rabbitConfig: RabbitMQConfig) {
     super({
@@ -308,6 +311,7 @@ export class RabbitMQClient extends MessagingClient {
       conn.on("close", this.handleConnectionClose.bind(this));
 
       this.connecting = false;
+      this.reconnectAttempts = 0; // Reset attempts on successful connection
       this.rabbitEventEmitter.emit("connected");
 
       // Resubscribe to events if reconnecting
@@ -317,7 +321,6 @@ export class RabbitMQClient extends MessagingClient {
     } catch (error: any) {
       this.connecting = false;
       console.error("Failed to connect to RabbitMQ:", error);
-      this.scheduleReconnect();
       throw new ConnectionError(
         `Failed to connect to RabbitMQ: ${error.message}`
       );
@@ -569,6 +572,12 @@ export class RabbitMQClient extends MessagingClient {
    * is already closed.
    */
   public async close(): Promise<void> {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+    }
+    this.reconnecting = false;
+    this.reconnectAttempts = 0;
+
     if (this.channel) {
       try {
         await this.channel.close();
@@ -771,6 +780,10 @@ export class RabbitMQClient extends MessagingClient {
   private handleConnectionError(error: Error): void {
     this.log("error", `RabbitMQ connection error: ${error.message}`);
     this.rabbitEventEmitter.emit("error", error);
+    // Clear any existing reconnection timeout
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+    }
     this.scheduleReconnect();
   }
 
@@ -780,6 +793,12 @@ export class RabbitMQClient extends MessagingClient {
       this.rabbitEventEmitter.emit("disconnected");
       this.connection = null;
       this.channel = null;
+
+      // Clear any existing reconnection timeout
+      if (this.reconnectTimeout) {
+        clearTimeout(this.reconnectTimeout);
+      }
+
       this.scheduleReconnect();
     }
   }
@@ -787,25 +806,54 @@ export class RabbitMQClient extends MessagingClient {
   private reconnecting = false;
 
   private scheduleReconnect(): void {
-    if (this.reconnecting) return;
+    if (this.reconnecting || this.connection) return;
 
     this.reconnecting = true;
+    this.reconnectAttempts++;
 
-    setTimeout(async () => {
-      this.log("info", "Attempting to reconnect to RabbitMQ...");
+    // Check if we've exceeded max reconnection attempts
+    if (this.reconnectAttempts > this.maxReconnectAttempts) {
+      this.log(
+        "error",
+        `Max reconnection attempts (${this.maxReconnectAttempts}) reached. Stopping reconnection.`
+      );
+      this.reconnecting = false;
+      this.rabbitEventEmitter.emit(
+        "error",
+        new Error("Max reconnection attempts reached")
+      );
+      return;
+    }
+
+    // Use exponential backoff for retry delays
+    const delay = Math.min(
+      1000 * Math.pow(2, this.reconnectAttempts - 1),
+      30000
+    ); // Max 30 seconds
+
+    this.log(
+      "info",
+      `Scheduling reconnection attempt ${this.reconnectAttempts} in ${delay}ms...`
+    );
+
+    this.reconnectTimeout = setTimeout(async () => {
       try {
+        this.log("info", "Attempting to reconnect to RabbitMQ...");
         await this.connect();
+
         if (this.reconnectCallback) {
-          this.reconnectCallback(); // Call the reconnect callback
+          this.reconnectCallback();
         }
+
         this.rabbitEventEmitter.emit("reconnected");
+        this.reconnecting = false;
+        this.reconnectAttempts = 0; // Reset attempts on successful connection
       } catch (error) {
         this.log("error", `Failed to reconnect to RabbitMQ: ${error}`);
-        this.scheduleReconnect(); // Retry reconnection
-      } finally {
         this.reconnecting = false;
+        this.scheduleReconnect(); // Try again with increased delay
       }
-    }, this.config.reconnectInterval);
+    }, delay);
   }
 
   private async resubscribeAll(): Promise<void> {
