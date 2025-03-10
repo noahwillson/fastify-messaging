@@ -91,3 +91,10 @@ export type ConnectionStatus =
   | "disconnected"
   | "connecting"
   | "error";
+
+/**
+ * Type definition for message publishing function
+ */
+export interface PublishFunction {
+  <T>(topic: string, message: T, options?: MessageOptions): Promise<boolean>;
+}
