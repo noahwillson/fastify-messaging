@@ -262,25 +262,30 @@ export class RabbitMQClient extends MessagingClient {
         await this.channel.assertQueue(this.config.deadLetterQueue, {
           durable: true,
           arguments: {
-            ...this.config.queueOptions?.arguments,
+            ...(this.rabbitConfig.queueOptions?.arguments || {}),
           },
         });
 
-        // Bind the DLQ to the DLX
+        // Use specific routing key if provided, otherwise use "#" as default
+        const routingKey = this.config.deadLetterRoutingKey || "#";
+
+        // Bind the DLQ to the DLX with the specified routing key
         await this.channel.bindQueue(
           this.config.deadLetterQueue,
           this.config.deadLetterExchange,
-          "#" // Routing pattern for this application's failed messages
+          routingKey
+        );
+
+        this.log(
+          "info",
+          `Dead Letter Queue '${this.config.deadLetterQueue}' bound to exchange '${this.config.deadLetterExchange}' with routing key '${routingKey}'`
         );
       }
-
+    } catch (error: any) {
       this.log(
-        "info",
-        `Dead Letter Exchange setup complete: ${this.config.deadLetterExchange}`
+        "error",
+        `Failed to setup Dead Letter Exchange: ${error.message}`
       );
-    } catch (error) {
-      this.log("error", `Failed to setup Dead Letter Exchange: ${error}`);
-      throw error;
     }
   }
 
@@ -533,7 +538,10 @@ export class RabbitMQClient extends MessagingClient {
     handler: MessageHandler<T>,
     dlxExchange: string,
     dlxQueue: string,
-    options: SubscriptionOptions & { ackMode: "auto" | "manual" } = {
+    options: SubscriptionOptions & {
+      ackMode: "auto" | "manual";
+      dlxRoutingKey?: string; // Add optional routing key
+    } = {
       ackMode: "manual",
     }
   ): Promise<string> {
@@ -548,12 +556,22 @@ export class RabbitMQClient extends MessagingClient {
     }
 
     try {
-      // Create DLX exchange and queue
+      // Create DLX exchange and queue with topic type
       await this.channel.assertExchange(dlxExchange, "topic", {
         durable: true,
       });
-      await this.channel.assertQueue(dlxQueue, { durable: true });
-      await this.channel.bindQueue(dlxQueue, dlxExchange, "#");
+      await this.channel.assertQueue(dlxQueue, {
+        durable: true,
+        arguments: {
+          ...(options.arguments || {}),
+        },
+      });
+
+      // Use specific routing key if provided, otherwise use "#" as default
+      const dlxRoutingKey = options.dlxRoutingKey || "#";
+
+      // Use specific routing key pattern for DLX binding
+      await this.channel.bindQueue(dlxQueue, dlxExchange, dlxRoutingKey);
 
       // Create main queue with DLX settings
       const queueName = this.getQueueName(topic, options.queueName);
@@ -566,8 +584,8 @@ export class RabbitMQClient extends MessagingClient {
           autoDelete: options.autoDelete ?? !options.queueName,
           arguments: {
             ...(options.arguments || {}),
-            "x-dead-letter-exchange": dlxExchange, // Route failed messages to DLX
-            "x-dead-letter-routing-key": `failed.${topic}`,
+            "x-dead-letter-exchange": dlxExchange,
+            "x-dead-letter-routing-key": `failed.${topic}`, // Use proper routing key format
           },
         }
       );
