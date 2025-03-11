@@ -15,7 +15,10 @@
     "prepublishOnly": "npm run build",
     "example:consumer": "ts-node examples/consumer-service.ts",
     "example:publisher": "ts-node examples/publisher-service.ts",
-    "example:dlx": "ts-node examples/test-dlx.ts"
+    "example:dlx": "ts-node examples/test-dlx.ts",
+    "example:advanced-dlx": "ts-node examples/advanced-dlx.ts",
+    "example:custom-exchanges": "ts-node examples/custom-exchanges.ts",
+    "example:connection-resilience": "ts-node examples/connection-resilience.ts"
   },
   "keywords": [
     "fastify",
