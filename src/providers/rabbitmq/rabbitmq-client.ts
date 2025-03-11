@@ -485,41 +485,55 @@ export class RabbitMQClient extends MessagingClient {
     if (!this.channel) return;
 
     const queueName = this.getQueueName(topic, options.queueName);
-    const queueArguments = { ...options.arguments };
 
-    if (
-      this.config.deadLetterExchange &&
-      !queueName.startsWith("dlq.") &&
-      this.config.deadLetterQueue
-    ) {
-      queueArguments["x-dead-letter-exchange"] = this.config.deadLetterExchange;
-      queueArguments["x-dead-letter-routing-key"] = topic;
-    }
+    // Use custom exchange name if provided, otherwise use the default
+    const exchangeName = options.exchangeName || this.getExchangeName();
 
-    const { queue: queueCreated } = await this.channel.assertQueue(queueName, {
+    // Set up queue with DLX if configured
+    const queueOptions: amqplib.Options.AssertQueue = {
       exclusive: options.exclusive ?? !options.queueName,
       durable: options.durable ?? !!options.queueName,
       autoDelete: options.autoDelete ?? !options.queueName,
-      arguments: queueArguments,
+      arguments: {
+        ...(options.arguments || {}),
+      },
+    };
+
+    // Add DLX configuration if available
+    if (this.config.deadLetterExchange) {
+      // Determine the routing key for dead-lettered messages
+      const deadLetterRoutingKey =
+        this.config.deadLetterMessageRoutingKey || topic;
+
+      queueOptions.arguments = {
+        ...queueOptions.arguments,
+        "x-dead-letter-exchange": this.config.deadLetterExchange,
+        "x-dead-letter-routing-key": deadLetterRoutingKey,
+      };
+    }
+
+    const { queue } = await this.channel.assertQueue(queueName, queueOptions);
+
+    // Bind to the specified exchange (custom or default)
+    await this.channel.bindQueue(queue, exchangeName, topic);
+
+    // Create message handler with proper acknowledgment mode
+    const messageHandler = this.createMessageHandler(
+      subscriptionId,
+      handler as MessageHandler,
+      options.ackMode
+    );
+
+    // Set up consumer
+    const { consumerTag } = await this.channel.consume(queue, messageHandler, {
+      noAck: options.ackMode === "auto",
     });
 
-    await this.channel.bindQueue(
-      queueCreated,
-      this.rabbitConfig.exchange,
-      topic
-    );
-
-    const { consumerTag } = await this.channel.consume(
-      queueCreated,
-      this.createMessageHandler(subscriptionId, handler, options.ackMode),
-      { noAck: options.ackMode === "auto" }
-    );
-
-    // Update the subscription with queue and consumer info
+    // Update subscription with consumer tag and queue name
     const subscription = this.subscriptions.get(subscriptionId);
     if (subscription) {
       subscription.consumerTag = consumerTag;
-      subscription.queueName = queueCreated;
+      subscription.queueName = queue;
     }
   }
 
@@ -590,12 +604,10 @@ export class RabbitMQClient extends MessagingClient {
         }
       );
 
-      // Bind the queue to the exchange with the topic
-      await this.channel.bindQueue(
-        queueCreated,
-        this.rabbitConfig.exchange,
-        topic
-      );
+      // Use custom exchange name if provided, otherwise use the default
+      const exchangeName = options.exchangeName || this.getExchangeName();
+
+      await this.channel.bindQueue(queueCreated, exchangeName, topic);
 
       // Start consuming messages
       const { consumerTag } = await this.channel.consume(
