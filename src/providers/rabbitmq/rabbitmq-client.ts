@@ -583,9 +583,9 @@ export class RabbitMQClient extends MessagingClient {
           durable: options.durable ?? !!options.queueName,
           autoDelete: options.autoDelete ?? !options.queueName,
           arguments: {
-            ...(options.arguments || {}),
             "x-dead-letter-exchange": dlxExchange,
-            "x-dead-letter-routing-key": `failed.${topic}`, // Use proper routing key format
+            "x-dead-letter-routing-key": dlxRoutingKey, // Use proper routing key format
+            ...(options.arguments || {}),
           },
         }
       );
@@ -853,7 +853,7 @@ export class RabbitMQClient extends MessagingClient {
               // Publish directly to DLX with updated headers
               await this.channel.publish(
                 this.config.deadLetterExchange,
-                `failed.${msg.fields.routingKey}`,
+                msg.fields.routingKey,
                 errorMsg,
                 {
                   ...msg.properties,
