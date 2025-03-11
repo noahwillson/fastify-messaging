@@ -25,6 +25,8 @@ export interface RabbitMQConfig extends MessagingConfig {
     alternateExchange?: string;
     arguments?: any;
   };
+  initialConnectionRetries?: number; // Number of initial connection attempts
+  initialConnectionDelay?: number; // Delay between initial connection attempts in ms
 }
 
 export type RabbitMQEvents =
