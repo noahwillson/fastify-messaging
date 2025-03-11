@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.2.2
+
+### Patch Changes
+
+- 9454a5a: dlq routing
+
 ## 1.2.1
 
 ### Patch Changes
