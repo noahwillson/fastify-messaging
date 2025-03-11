@@ -28,6 +28,12 @@ async function start() {
     maxReconnectAttempts: 2,
   });
 
+  // Get connection status for monitoring/health checks
+  const mqStatus = messagingClient.getConnectionStatus();
+  console.log(`RabbitMQ connected: ${mqStatus.connected}`);
+  console.log(`Permanent failure: ${mqStatus.permanentFailure}`);
+  console.log(`Retry count: ${mqStatus.retryCount}`);
+
   // Set up event handlers BEFORE connecting
   messagingClient.on("connected", () => {
     console.log("Connected to RabbitMQ");
@@ -45,6 +51,12 @@ async function start() {
     console.error("RabbitMQ error:", error);
   });
 
+  // Listen for connection status events
+  messagingClient.on("connection_permanently_down", () => {
+    console.log("RabbitMQ connection is permanently down");
+    // Trigger alerts, notifications, or fallback mechanisms
+  });
+
   // Set up reconnect callback
   messagingClient.onReconnect(async () => {
     console.log("Custom reconnect logic executing");
@@ -55,6 +67,8 @@ async function start() {
   await fastify.register(fastifyMessaging, {
     client: messagingClient,
   });
+
+  await messagingClient.attemptRecovery();
 
   fastify.post("/users", async (request, reply) => {
     const user = request.body as any;
@@ -102,7 +116,6 @@ async function start() {
 
   await fastify.listen({ port: 3002, host: "0.0.0.0" });
 }
-
 
 start().catch((err) => {
   console.error("Error starting server:", err);
