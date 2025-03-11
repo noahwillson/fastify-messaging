@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.2.6
+
+### Patch Changes
+
+- e570ff0: documentation
+
 ## 1.2.5
 
 ### Patch Changes
