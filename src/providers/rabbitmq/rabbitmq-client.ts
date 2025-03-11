@@ -41,8 +41,11 @@ export class RabbitMQClient extends MessagingClient {
   private logLevel: "info" | "warn" | "error" = "info";
   protected config: RabbitMQConfig;
   private reconnectAttempts: number = 0;
-  private maxReconnectAttempts: number = 10; // Add maximum reconnection attempts
+  private maxReconnectAttempts: number = 10;
+  private reconnectBaseDelay: number = 1000;
+  private isConnectionPermanentlyDown: boolean = false;
   private reconnectTimeout?: NodeJS.Timeout;
+  private connectionMonitorInterval?: NodeJS.Timeout;
 
   constructor(private rabbitConfig: RabbitMQConfig) {
     super({
@@ -53,6 +56,9 @@ export class RabbitMQClient extends MessagingClient {
       reconnectInterval: 5000,
       ...rabbitConfig,
     };
+
+    // Start connection monitoring
+    this.startConnectionMonitor();
   }
 
   /**
@@ -320,36 +326,30 @@ export class RabbitMQClient extends MessagingClient {
 
         this.connecting = false;
         this.reconnectAttempts = 0;
+
+        // Reset permanent failure flag if connection is successful
+        if (this.isConnectionPermanentlyDown) {
+          this.isConnectionPermanentlyDown = false;
+        }
+
         this.rabbitEventEmitter.emit("connected");
 
         if (this.subscriptions.size > 0) {
           await this.resubscribeAll();
         }
-
-        return true;
       } catch (error: any) {
         this.connecting = false;
         this.rabbitEventEmitter.emit("error", error);
 
-        // Schedule next attempt with exponential backoff
-        const delay = Math.min(
-          1000 * Math.pow(2, this.reconnectAttempts),
-          30000
-        );
-        this.reconnectAttempts++;
+        this.log("error", `Connection error: ${error.message}`);
 
-        this.log(
-          "info",
-          `Connection failed, retrying in ${delay / 1000} seconds...`
-        );
-
-        setTimeout(attemptConnection, delay);
-        return false;
+        // Use the handleReconnectError method for consistent retry handling
+        this.handleReconnectError(error);
       }
     };
 
-    // Start connection attempts in background
-    attemptConnection();
+    // Start connection attempt
+    await attemptConnection();
   }
 
   /**
@@ -367,12 +367,25 @@ export class RabbitMQClient extends MessagingClient {
     options: MessageOptions = {},
     eventType?: string
   ): Promise<boolean> {
-    if (!this.channel) {
-      await this.connect();
+    if (this.isConnectionPermanentlyDown) {
+      this.log(
+        "warn",
+        "Message not sent - RabbitMQ connection is permanently down"
+      );
+      return false;
     }
 
     if (!this.channel) {
-      throw new PublishError("Failed to establish connection to RabbitMQ");
+      try {
+        await this.connect();
+      } catch (error) {
+        this.log("error", `Failed to connect for message publishing: ${error}`);
+        return false;
+      }
+    }
+
+    if (!this.channel) {
+      return false;
     }
 
     try {
@@ -382,12 +395,13 @@ export class RabbitMQClient extends MessagingClient {
       return this.channel.publish(exchangeName, topic, content, {
         persistent: true,
         contentType: "application/json",
-        expiration: options.ttl?.toString(), //set TTL
+        expiration: options.ttl?.toString(),
         priority: options.priority,
         ...options,
       });
     } catch (error: any) {
-      throw new PublishError(`Failed to publish message: ${error.message}`);
+      this.log("error", `Failed to publish message: ${error.message}`);
+      return false;
     }
   }
 
@@ -427,21 +441,32 @@ export class RabbitMQClient extends MessagingClient {
           // Don't throw, just log the error
         }
       } else {
-        this.log(
-          "info",
-          "RabbitMQ connection not available, subscription will be established when connected"
-        );
-        // Trigger connection attempt if not already connecting
-        if (!this.connecting) {
-          this.connect();
+        if (this.isConnectionPermanentlyDown) {
+          this.log(
+            "warn",
+            "RabbitMQ connection is permanently down - subscription registered but inactive"
+          );
+        } else {
+          this.log(
+            "info",
+            "RabbitMQ connection not available, subscription will be established when connected"
+          );
+          // Trigger connection attempt if not already connecting
+          if (!this.connecting) {
+            this.connect().catch((error) => {
+              this.log("error", `Failed to initiate connection: ${error}`);
+            });
+          }
         }
       }
 
       return subscriptionId;
     } catch (error: any) {
-      throw new SubscriptionError(
+      this.log(
+        "error",
         `Failed to subscribe to topic ${topic}: ${error.message}`
       );
+      throw new SubscriptionError(`Failed to subscribe: ${error.message}`);
     }
   }
 
@@ -651,9 +676,28 @@ export class RabbitMQClient extends MessagingClient {
    */
 
   public async gracefulShutdown(timeout: number = 5000): Promise<void> {
-    if (!this.connection) return;
+    this.log("info", "Starting graceful shutdown...");
 
-    this.log("info", "Shutting down gracefully...");
+    // Stop connection monitor
+    if (this.connectionMonitorInterval) {
+      clearInterval(this.connectionMonitorInterval);
+      this.connectionMonitorInterval = undefined;
+    }
+
+    // Mark the client as permanently down to prevent reconnection attempts
+    this.isConnectionPermanentlyDown = true;
+
+    // Clear any pending reconnection timeouts
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = undefined;
+    }
+
+    // No active connection, nothing to clean up
+    if (!this.connection || !this.channel) {
+      this.log("info", "No active connection to close");
+      return;
+    }
 
     if (this.inProgressMessages > 0) {
       this.log(
@@ -819,11 +863,14 @@ export class RabbitMQClient extends MessagingClient {
   private handleConnectionError(error: Error): void {
     this.log("error", `RabbitMQ connection error: ${error.message}`);
     this.rabbitEventEmitter.emit("error", error);
+
     // Clear any existing reconnection timeout
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
     }
-    this.scheduleReconnect();
+
+    // Use the new reconnect error handler
+    this.handleReconnectError(error);
   }
 
   private handleConnectionClose(): void {
@@ -838,7 +885,11 @@ export class RabbitMQClient extends MessagingClient {
         clearTimeout(this.reconnectTimeout);
       }
 
-      this.scheduleReconnect();
+      // Use the handleReconnectError if not caused by a graceful shutdown
+      if (!this.isConnectionPermanentlyDown) {
+        const error = new Error("Connection closed unexpectedly");
+        this.handleReconnectError(error);
+      }
     }
   }
 
@@ -892,5 +943,78 @@ export class RabbitMQClient extends MessagingClient {
         this.log("error", `Failed to resubscribe to ${sub.topic}: ${error}`);
       }
     }
+  }
+
+  private startConnectionMonitor(): void {
+    if (this.connectionMonitorInterval) {
+      clearInterval(this.connectionMonitorInterval);
+    }
+
+    this.connectionMonitorInterval = setInterval(() => {
+      if (this.isConnectionPermanentlyDown) {
+        this.log("info", "Periodic connection health check");
+        this.attemptRecovery();
+      }
+    }, 300000); // Every 5 minutes
+  }
+
+  public async attemptRecovery(): Promise<void> {
+    if (this.isConnectionPermanentlyDown) {
+      this.log("info", "Attempting manual RabbitMQ connection recovery");
+      this.isConnectionPermanentlyDown = false;
+      this.reconnectAttempts = 0;
+      await this.connect();
+    }
+  }
+
+  public getConnectionStatus(): {
+    connected: boolean;
+    permanentFailure: boolean;
+    retryCount: number;
+  } {
+    return {
+      connected: !!this.connection,
+      permanentFailure: this.isConnectionPermanentlyDown,
+      retryCount: this.reconnectAttempts,
+    };
+  }
+
+  /**
+   * Handles error during reconnection attempts by applying exponential backoff
+   * and eventually marking the connection as permanently down after maximum attempts.
+   */
+  private handleReconnectError(error: Error): void {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      if (!this.isConnectionPermanentlyDown) {
+        this.isConnectionPermanentlyDown = true;
+        this.log(
+          "error",
+          "Max reconnect attempts reached. RabbitMQ connection is offline. Server remains operational."
+        );
+        this.rabbitEventEmitter.emit("connection_permanently_down");
+      }
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = Math.min(
+      this.reconnectBaseDelay * Math.pow(2, this.reconnectAttempts),
+      30000 // 30s max delay
+    );
+
+    this.log(
+      "warn",
+      `Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${
+        this.maxReconnectAttempts
+      })`
+    );
+
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+    }
+
+    this.reconnectTimeout = setTimeout(() => {
+      this.connect();
+    }, delay);
   }
 }
