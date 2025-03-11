@@ -489,6 +489,18 @@ export class RabbitMQClient extends MessagingClient {
     // Use custom exchange name if provided, otherwise use the default
     const exchangeName = options.exchangeName || this.getExchangeName();
 
+    // Assert the exchange if a custom exchange name is provided
+    if (options.exchangeName) {
+      await this.channel.assertExchange(
+        exchangeName,
+        options.exchangeType || this.rabbitConfig.exchangeType || "topic",
+        {
+          durable: true,
+          ...this.rabbitConfig.exchangeOptions,
+        }
+      );
+    }
+
     // Set up queue with DLX if configured
     const queueOptions: amqplib.Options.AssertQueue = {
       exclusive: options.exclusive ?? !options.queueName,
@@ -606,6 +618,18 @@ export class RabbitMQClient extends MessagingClient {
 
       // Use custom exchange name if provided, otherwise use the default
       const exchangeName = options.exchangeName || this.getExchangeName();
+
+      // Assert the exchange if a custom exchange name is provided
+      if (options.exchangeName) {
+        await this.channel.assertExchange(
+          exchangeName,
+          options.exchangeType || this.rabbitConfig.exchangeType || "topic",
+          {
+            durable: true,
+            ...this.rabbitConfig.exchangeOptions,
+          }
+        );
+      }
 
       await this.channel.bindQueue(queueCreated, exchangeName, topic);
 
