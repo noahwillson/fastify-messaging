@@ -34,6 +34,7 @@ export interface SubscriptionOptions {
   autoDelete?: boolean;
   prefetch?: number;
   ackMode: "auto" | "manual";
+  exchangeName?: string; // Custom exchange name to override the default
   arguments?: {
     "x-message-ttl"?: number;
     "x-expires"?: number;
