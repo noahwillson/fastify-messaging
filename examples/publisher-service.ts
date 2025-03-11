@@ -25,6 +25,7 @@ async function start() {
     heartbeat: 60,
     deadLetterExchange: "dlx.example",
     deadLetterQueue: "dlq.example",
+    maxReconnectAttempts: 2,
   });
 
   // Set up event handlers BEFORE connecting
@@ -101,6 +102,7 @@ async function start() {
 
   await fastify.listen({ port: 3002, host: "0.0.0.0" });
 }
+
 
 start().catch((err) => {
   console.error("Error starting server:", err);
