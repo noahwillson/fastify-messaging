@@ -33,4 +33,5 @@ export type RabbitMQEvents =
   | "connected"
   | "disconnected"
   | "reconnected"
-  | "error";
+  | "error"
+  | "connection_permanently_down";
