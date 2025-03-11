@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.2.4
+
+### Patch Changes
+
+- 2f112c3: exchange_name_subs
+
 ## 1.2.3
 
 ### Patch Changes
