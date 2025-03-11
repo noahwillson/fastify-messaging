@@ -21,6 +21,7 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
 6. [Subscribing to Messages](#subscribing-to-messages)
 7. [Advanced Features](#advanced-features)
    - [Fanout Exchanges](#fanout-exchanges)
+   - [Custom Exchanges](#custom-exchanges)
    - [Dead Letter Exchanges](#dead-letter-exchanges-dlx)
    - [Event Handling](#event-handling)
    - [Graceful Shutdown](#graceful-shutdown)
@@ -39,13 +40,15 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
 - Abstract messaging interface that can be implemented by different providers
 - Built-in RabbitMQ implementation with advanced features:
   - Multiple exchange types (topic, fanout)
-  - Dead Letter Exchange (DLX) integration
+  - Dead Letter Exchange (DLX) integration with configurable routing keys
+  - Connection resilience with automatic recovery
+  - Custom exchange support for multi-application scenarios
   - Configurable logging levels
   - Event-driven connection lifecycle management
   - Graceful shutdown handling
 - Fastify plugin for easy integration
 - TypeScript support with generics for message types
-- Automatic reconnection with configurable intervals
+- Automatic reconnection with configurable intervals and exponential backoff
 - Message TTL and priority support
 - Manual/Auto message acknowledgment modes
 - Prefetch configuration for message processing rate
@@ -255,17 +258,36 @@ Implementation of `MessagingClient` for RabbitMQ.
 
 ```typescript
 interface RabbitMQConfig {
-  url: string; // RabbitMQ connection URL
-  exchange: string; // Exchange name
-  exchangeType?: string; // Exchange type (default: 'topic')
-  exchangeOptions?: amqplib.Options.AssertExchange;
-  prefetch?: number; // Prefetch count (default: 10)
-  reconnectInterval?: number; // Reconnection interval in ms (default: 5000)
-  vhost?: string; // Virtual host
-  heartbeat?: number; // Heartbeat interval in seconds
-  connectionTimeout?: number; // Connection timeout in ms
+  url: string;
+  exchange: string;
+  exchangeType?: "direct" | "topic" | "fanout" | "headers";
+  prefetch?: number;
+  vhost?: string;
+  heartbeat?: number;
+  connectionTimeout?: number;
+  maxReconnectAttempts?: number;
+  reconnectBackoffMultiplier?: number;
+  maxReconnectDelay?: number;
   getExchangeName?: (eventType: string) => string;
   getQueueName?: (eventType: string, queueName?: string) => string;
+  queueOptions?: {
+    durable?: boolean;
+    exclusive?: boolean;
+    autoDelete?: boolean;
+    arguments?: any;
+  };
+  deadLetterExchange?: string;
+  deadLetterQueue?: string;
+  deadLetterRoutingKey?: string; // Routing key for binding DLQ to DLX
+  exchangeOptions?: {
+    alternateExchange?: string;
+    arguments?: any;
+    durable?: boolean;
+    internal?: boolean;
+    autoDelete?: boolean;
+  };
+  initialConnectionRetries?: number; // Number of initial connection attempts
+  initialConnectionDelay?: number; // Delay between initial connection attempts in ms
 }
 ```
 
@@ -338,14 +360,27 @@ interface MessageOptions {
 
 // Options for subscribing to messages
 interface SubscriptionOptions {
-  queueName?: string; // Name of the queue (default: auto-generated)
-  exclusive?: boolean; // Whether the queue is exclusive (default: !queueName)
-  durable?: boolean; // Whether the queue is durable (default: !!queueName)
-  autoDelete?: boolean; // Whether the queue is auto-deleted (default: !queueName)
-  prefetch?: number; // Prefetch count for this subscription
-  ackMode?: "auto" | "manual";
-  arguments?: any; // DLX configuration
-  [key: string]: any;
+  queueName?: string;
+  exclusive?: boolean;
+  durable?: boolean;
+  autoDelete?: boolean;
+  prefetch?: number;
+  ackMode: "auto" | "manual";
+  exchangeName?: string; // Custom exchange name to override the default
+  exchangeType?: "direct" | "topic" | "fanout" | "headers"; // Exchange type for custom exchange
+  dlxRoutingKey?: string; // Routing key for binding DLQ to DLX (for subscribeWithDLX)
+  arguments?: {
+    "x-message-ttl"?: number;
+    "x-expires"?: number;
+    "x-max-length"?: number;
+    "x-max-length-bytes"?: number;
+    "x-overflow"?: "drop-head" | "reject-publish";
+    "x-dead-letter-exchange"?: string;
+    "x-dead-letter-routing-key"?: string;
+    "x-single-active-consumer"?: boolean;
+    "x-max-priority"?: number;
+    [key: string]: any;
+  };
 }
 ```
 
@@ -408,36 +443,120 @@ await fastify.messaging.unsubscribe(subscriptionId);
 ### Fanout Exchanges
 
 ```typescript
-// Publisher
-await client.publishToFanout("system.alerts", {
-  severity: "critical",
-  message: "Server down!",
-});
+// Publish to a fanout exchange
+await client.publishToFanout("broadcast", { message: "Hello everyone!" });
 
-// Subscriber
+// Subscribe to a fanout exchange
 await client.subscribeToFanout(
-  "system.alerts",
-  (msg) => console.log("ALERT:", msg.content),
-  "alerts-queue"
+  "broadcast",
+  async (msg) => {
+    console.log("Received broadcast:", msg.content);
+  },
+  "broadcast_queue"
 );
 ```
 
+### Custom Exchanges
+
+The RabbitMQ client supports working with multiple exchanges in a single client instance, which is useful for multi-application scenarios:
+
+```typescript
+// Create a client with a default exchange
+const client = new RabbitMQClient({
+  url: "amqp://localhost",
+  exchange: "main-exchange",
+  exchangeType: "topic",
+});
+
+// Subscribe to the default exchange
+await client.subscribe("orders.created", async (msg) => {
+  console.log("Order created:", msg.content);
+});
+
+// Subscribe to a different exchange
+await client.subscribe(
+  "payments.processed",
+  async (msg) => {
+    console.log("Payment processed:", msg.content);
+  },
+  {
+    ackMode: "manual",
+    exchangeName: "payments-exchange", // Custom exchange name
+    exchangeType: "topic", // Exchange type (optional)
+  }
+);
+```
+
+Key features:
+
+- **Automatic Exchange Creation**: Custom exchanges are automatically created if they don't exist
+- **Exchange Type Control**: Specify the exchange type for custom exchanges
+- **Multiple Applications**: Use a single client to interact with multiple exchanges
+- **Consistent Configuration**: Exchange options from the main config are applied to custom exchanges
+
 ### Dead Letter Exchanges (DLX)
+
+Dead Letter Exchanges provide a mechanism to handle messages that cannot be processed successfully. The RabbitMQ client supports comprehensive DLX configuration with the following features:
+
+#### Basic DLX Configuration
+
+Configure DLX globally when creating the client:
+
+```typescript
+const client = new RabbitMQClient({
+  url: "amqp://localhost",
+  exchange: "main-exchange",
+  deadLetterExchange: "dlx.example",
+  deadLetterQueue: "dlq.example",
+  deadLetterRoutingKey: "#", // Optional: Routing key for binding DLQ to DLX
+});
+```
+
+#### Per-Subscription DLX Configuration
 
 ```typescript
 await client.subscribeWithDLX(
   "payment.process",
   async (msg) => {
     // Process payment
+    if (!isValid(msg.content)) {
+      // Message will be sent to DLQ when rejected
+      msg.nack(false); // false = don't requeue
+    }
   },
-  "payments_dlx",
-  "payments_dlx_queue",
+  "payments_dlx", // DLX name
+  "payments_dlq", // DLQ name
   {
     queueName: "payments",
-    arguments: {
-      "x-message-ttl": 60000,
-      "x-dead-letter-exchange": "payments_dlx",
-    },
+    dlxRoutingKey: "payments.#", // Optional: Custom routing key for binding DLQ to DLX
+    ackMode: "manual",
+  }
+);
+```
+
+#### Advanced DLX Features
+
+- **Configurable Routing Keys**: Control how messages are routed to and within the DLX
+- **TTL for Dead Letter Queues**: Messages in DLQs expire after 7 days by default
+- **Custom Exchange Types**: DLX uses topic exchange type for flexible routing patterns
+- **Microservice Isolation**: Each service can have its own DLQ with specific routing patterns
+
+#### Processing Failed Messages
+
+```typescript
+// Consume from the DLQ to handle failed messages
+await client.subscribe(
+  "#", // Match all routing keys
+  async (msg) => {
+    console.log("Failed message:", msg.content);
+    console.log("Original routing key:", msg.fields.routingKey);
+
+    // Process failed message or log it
+    msg.ack();
+  },
+  {
+    ackMode: "manual",
+    queueName: "dlq.example", // Name of your DLQ
   }
 );
 ```
@@ -448,7 +567,48 @@ await client.subscribeWithDLX(
 client.on("connected", () => console.log("Connected to RabbitMQ"));
 client.on("error", (err) => console.error("RabbitMQ error:", err));
 client.on("reconnected", () => console.log("Reconnected successfully"));
+client.on("connection_permanently_down", () =>
+  console.log("RabbitMQ connection is permanently down")
+);
 ```
+
+### Connection Resilience
+
+The RabbitMQ client includes robust connection management to ensure your application remains operational even when RabbitMQ is unavailable:
+
+```typescript
+// Configure connection resilience
+const client = new RabbitMQClient({
+  url: "amqp://localhost",
+  exchange: "main-exchange",
+  maxReconnectAttempts: 10, // Maximum reconnection attempts before entering permanent down state
+  reconnectBackoffMultiplier: 2, // Multiplier for exponential backoff
+  maxReconnectDelay: 30000, // Maximum delay between reconnection attempts (30 seconds)
+});
+
+// Get connection status
+const status = client.getConnectionStatus();
+console.log(`Connected: ${status.connected}`);
+console.log(`Permanent failure: ${status.permanentFailure}`);
+console.log(`Retry count: ${status.retryCount}`);
+
+// Listen for connection events
+client.on("connection_permanently_down", () => {
+  console.log("RabbitMQ connection is permanently down");
+  // Implement fallback mechanisms or notify monitoring systems
+});
+
+// Manually trigger recovery attempt
+await client.attemptRecovery();
+```
+
+Key features:
+
+- **Exponential Backoff**: Gradually increases delay between reconnection attempts
+- **Permanent Down State**: After maximum attempts, enters a permanent down state without crashing
+- **Background Recovery**: Periodically attempts recovery in the background
+- **Graceful Degradation**: Publishing attempts return false instead of throwing errors when disconnected
+- **Connection Status**: Provides detailed connection status information
 
 ### Graceful Shutdown
 
@@ -649,91 +809,25 @@ await client.subscribeWithDLX(
 
 ## Important Updates and Best Practices
 
-### Connection Event Handling
+1. **Connection Resilience**: The client now supports robust connection management with automatic recovery and permanent down state detection. Use the `connection_permanently_down` event to implement fallback mechanisms.
 
-Always set up event listeners BEFORE connecting or registering the plugin:
+2. **Custom Exchanges**: You can now subscribe to different exchanges using the same client instance by specifying `exchangeName` and `exchangeType` in subscription options.
 
-```typescript
-// Create client
-const messagingClient = new RabbitMQClient({...});
+3. **Configurable DLX Routing**: Dead Letter Exchange routing is now fully configurable with `deadLetterRoutingKey` and `deadLetterMessageRoutingKey` options.
 
-// Set up event handlers FIRST
-messagingClient.on("connected", () => {...});
-messagingClient.on("error", (error) => {...});
+4. **TTL for Dead Letter Queues**: Messages in Dead Letter Queues now have a default TTL of 7 days to prevent infinite storage.
 
-// THEN register plugin or connect
-await fastify.register(fastifyMessaging, { client: messagingClient });
-// OR
-await messagingClient.connect();
-```
+5. **Exponential Backoff**: Connection retry logic now uses exponential backoff with configurable parameters.
 
-### Dead Letter Exchange Configuration
+6. **Manual Acknowledgment**: Always use manual acknowledgment mode for critical messages to ensure proper processing.
 
-Configure DLX through client options for automatic setup:
+7. **Graceful Shutdown**: Implement graceful shutdown to ensure in-flight messages are processed before application exit.
 
-```typescript
-const client = new RabbitMQClient({
-  // Basic configuration
-  url: "amqp://localhost",
-  exchange: "events",
+8. **Error Handling**: Implement proper error handling in message handlers to prevent unhandled rejections.
 
-  // DLX configuration - all subscriptions will use this
-  deadLetterExchange: "events.dlx",
-  deadLetterQueue: "events.dlq",
-});
-```
+9. **Message Serialization**: Be mindful of message serialization limitations; complex objects may lose information.
 
-### Error Handling Best Practices
-
-Use proper error handling with typed acknowledgments:
-
-```typescript
-try {
-  // Process message
-  await message.ack();
-} catch (error) {
-  if (error instanceof ValidationError) {
-    // Don't requeue invalid messages
-    await message.nack(false);
-  } else {
-    // Requeue for transient errors
-    await message.nack(true);
-  }
-}
-```
-
-### Reconnection Handling
-
-```typescript
-client.onReconnect(async () => {
-  console.log("Reconnected to RabbitMQ");
-  // Implement custom reconnection logic
-  await retryBufferedMessages();
-});
-```
-
-### Message Type Safety
-
-Use TypeScript generics for type-safe messaging:
-
-```typescript
-interface OrderEvent {
-  id: string;
-  amount: number;
-}
-
-// Type-safe publishing
-await client.publish<OrderEvent>("order.created", {
-  id: "123",
-  amount: 99.99,
-});
-
-// Type-safe subscription
-await client.subscribe<OrderEvent>("order.created", (message) => {
-  // message.content is typed as OrderEvent
-  console.log(message.content.amount);
-});
-```
+10. **Topic Naming**: Use consistent topic naming conventions to make routing patterns predictable.
 
 ## Why Use This Package?
 
