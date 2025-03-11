@@ -21,6 +21,7 @@ export interface RabbitMQConfig extends MessagingConfig {
   };
   deadLetterExchange?: string;
   deadLetterQueue?: string;
+  deadLetterRoutingKey?: string;
   exchangeOptions?: {
     alternateExchange?: string;
     arguments?: any;
