@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.2.1
+
+### Patch Changes
+
+- c165f88: Connection monitoring
+
 ## 1.2.0
 
 ### Minor Changes
