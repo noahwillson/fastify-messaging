@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.2.5
+
+### Patch Changes
+
+- 0694bb8: assertExchange
+
 ## 1.2.4
 
 ### Patch Changes
