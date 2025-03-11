@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.2.3
+
+### Patch Changes
+
+- e2b0657: minor dlq
+
 ## 1.2.2
 
 ### Patch Changes
