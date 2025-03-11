@@ -35,6 +35,7 @@ export interface SubscriptionOptions {
   prefetch?: number;
   ackMode: "auto" | "manual";
   exchangeName?: string; // Custom exchange name to override the default
+  exchangeType?: "direct" | "topic" | "fanout" | "headers"; // Exchange type for custom exchange
   arguments?: {
     "x-message-ttl"?: number;
     "x-expires"?: number;
