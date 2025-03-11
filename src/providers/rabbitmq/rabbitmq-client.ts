@@ -239,31 +239,43 @@ export class RabbitMQClient extends MessagingClient {
       return;
     }
 
-    // Create the Dead Letter Exchange
-    await this.channel.assertExchange(
-      this.config.deadLetterExchange,
-      "fanout",
-      { durable: true }
-    );
-
-    // Create the Dead Letter Queue if configured
-    if (this.config.deadLetterQueue) {
-      await this.channel.assertQueue(this.config.deadLetterQueue, {
-        durable: true,
-      });
-
-      // Bind the DLQ to the DLX
-      await this.channel.bindQueue(
-        this.config.deadLetterQueue,
+    try {
+      // Create the Dead Letter Exchange
+      await this.channel.assertExchange(
         this.config.deadLetterExchange,
-        "" // Empty routing key for fanout exchange
+        "topic",
+        {
+          durable: true,
+          autoDelete: false,
+          ...this.rabbitConfig.exchangeOptions,
+        }
       );
-    }
 
-    this.log(
-      "info",
-      `Dead Letter Exchange setup complete: ${this.config.deadLetterExchange}`
-    );
+      // Create the Dead Letter Queue if configured
+      if (this.config.deadLetterQueue) {
+        await this.channel.assertQueue(this.config.deadLetterQueue, {
+          durable: true,
+          arguments: {
+            ...this.config.queueOptions?.arguments,
+          },
+        });
+
+        // Bind the DLQ to the DLX
+        await this.channel.bindQueue(
+          this.config.deadLetterQueue,
+          this.config.deadLetterExchange,
+          "#" // Routing pattern for this application's failed messages
+        );
+      }
+
+      this.log(
+        "info",
+        `Dead Letter Exchange setup complete: ${this.config.deadLetterExchange}`
+      );
+    } catch (error) {
+      this.log("error", `Failed to setup Dead Letter Exchange: ${error}`);
+      throw error;
+    }
   }
 
   /**
@@ -276,55 +288,68 @@ export class RabbitMQClient extends MessagingClient {
       return;
     }
 
-    try {
-      this.connecting = true;
+    this.connecting = true;
 
-      // Use the correct connect method
-      const conn = await amqplib.connect(this.rabbitConfig.url, {
-        heartbeat: this.rabbitConfig.heartbeat || 60,
-        vhost: this.rabbitConfig.vhost || "/",
-        timeout: this.rabbitConfig.connectionTimeout,
-      });
-      this.connection = conn;
+    const attemptConnection = async () => {
+      try {
+        const conn = await amqplib.connect(this.rabbitConfig.url, {
+          heartbeat: this.rabbitConfig.heartbeat || 60,
+          vhost: this.rabbitConfig.vhost || "/",
+          timeout: this.rabbitConfig.connectionTimeout,
+        });
+        this.connection = conn;
 
-      // Create channel
-      const ch = await conn.createChannel();
-      this.channel = ch;
+        const ch = await conn.createChannel();
+        this.channel = ch;
 
-      // Set prefetch count
-      const prefetch = Math.max(1, this.rabbitConfig.prefetch || 10);
-      await ch.prefetch(prefetch);
+        const prefetch = Math.max(1, this.rabbitConfig.prefetch || 10);
+        await ch.prefetch(prefetch);
 
-      // Create exchange
-      await ch.assertExchange(
-        this.rabbitConfig.exchange,
-        this.rabbitConfig.exchangeType || "topic",
-        { durable: true, ...this.rabbitConfig.exchangeOptions }
-      );
+        await ch.assertExchange(
+          this.rabbitConfig.exchange,
+          this.rabbitConfig.exchangeType || "topic",
+          { durable: true, ...this.rabbitConfig.exchangeOptions }
+        );
 
-      if (this.config.deadLetterExchange) {
-        await this.setupDeadLetterExchange();
+        if (this.config.deadLetterExchange) {
+          await this.setupDeadLetterExchange();
+        }
+
+        conn.on("error", this.handleConnectionError.bind(this));
+        conn.on("close", this.handleConnectionClose.bind(this));
+
+        this.connecting = false;
+        this.reconnectAttempts = 0;
+        this.rabbitEventEmitter.emit("connected");
+
+        if (this.subscriptions.size > 0) {
+          await this.resubscribeAll();
+        }
+
+        return true;
+      } catch (error: any) {
+        this.connecting = false;
+        this.rabbitEventEmitter.emit("error", error);
+
+        // Schedule next attempt with exponential backoff
+        const delay = Math.min(
+          1000 * Math.pow(2, this.reconnectAttempts),
+          30000
+        );
+        this.reconnectAttempts++;
+
+        this.log(
+          "info",
+          `Connection failed, retrying in ${delay / 1000} seconds...`
+        );
+
+        setTimeout(attemptConnection, delay);
+        return false;
       }
+    };
 
-      // Setup connection event handlers
-      conn.on("error", this.handleConnectionError.bind(this));
-      conn.on("close", this.handleConnectionClose.bind(this));
-
-      this.connecting = false;
-      this.reconnectAttempts = 0; // Reset attempts on successful connection
-      this.rabbitEventEmitter.emit("connected");
-
-      // Resubscribe to events if reconnecting
-      if (this.subscriptions.size > 0) {
-        await this.resubscribeAll();
-      }
-    } catch (error: any) {
-      this.connecting = false;
-      console.error("Failed to connect to RabbitMQ:", error);
-      throw new ConnectionError(
-        `Failed to connect to RabbitMQ: ${error.message}`
-      );
-    }
+    // Start connection attempts in background
+    attemptConnection();
   }
 
   /**
@@ -381,76 +406,90 @@ export class RabbitMQClient extends MessagingClient {
       ackMode: "manual",
     }
   ): Promise<string> {
-    if (!this.channel) {
-      await this.connect();
-    }
-
-    if (!this.channel) {
-      throw new SubscriptionError("Failed to establish connection to RabbitMQ");
-    }
-
     try {
       // Generate a subscription ID
       const subscriptionId = uuidv4();
-
-      // Create a queue
-      const queueName = this.getQueueName(topic, options.queueName);
-
-      const queueArguments = {
-        ...options.arguments,
-      };
-
-      // Add Dead Letter Exchange configuration if enabled
-      if (
-        this.config.deadLetterExchange &&
-        queueName !== this.config.deadLetterQueue &&
-        !topic.startsWith("failed.")
-      ) {
-        queueArguments["x-dead-letter-exchange"] =
-          this.config.deadLetterExchange;
-        queueArguments["x-dead-letter-routing-key"] = `failed.${topic}`;
-      }
-
-      // Create a queue
-      const { queue: queueCreated } = await this.channel.assertQueue(
-        queueName,
-        {
-          exclusive: options.exclusive ?? !options.queueName,
-          durable: options.durable ?? !!options.queueName,
-          autoDelete: options.autoDelete ?? !options.queueName,
-          arguments: queueArguments,
-        }
-      );
-
-      // Bind the queue to the exchange with the topic
-      await this.channel.bindQueue(
-        queueCreated,
-        this.rabbitConfig.exchange,
-        topic
-      );
-
-      // Start consuming messages
-      const { consumerTag } = await this.channel.consume(
-        queueCreated,
-        this.createMessageHandler(subscriptionId, handler, options.ackMode),
-        { noAck: options.ackMode === "auto" }
-      );
 
       // Store the subscription
       this.subscriptions.set(subscriptionId, {
         topic,
         handler: handler as MessageHandler,
-        consumerTag,
-        queueName: queueCreated,
         type: "standard",
         options,
       });
+
+      // Try to set up the subscription if we're connected
+      if (this.channel) {
+        try {
+          await this.setupSubscription(subscriptionId, topic, handler, options);
+        } catch (error) {
+          this.log("error", `Failed to setup subscription: ${error}`);
+          // Don't throw, just log the error
+        }
+      } else {
+        this.log(
+          "info",
+          "RabbitMQ connection not available, subscription will be established when connected"
+        );
+        // Trigger connection attempt if not already connecting
+        if (!this.connecting) {
+          this.connect();
+        }
+      }
 
       return subscriptionId;
     } catch (error: any) {
       throw new SubscriptionError(
         `Failed to subscribe to topic ${topic}: ${error.message}`
       );
+    }
+  }
+
+  // New helper method to setup subscription
+  private async setupSubscription<T>(
+    subscriptionId: string,
+    topic: string,
+    handler: MessageHandler<T>,
+    options: SubscriptionOptions & { ackMode: "auto" | "manual" }
+  ): Promise<void> {
+    if (!this.channel) return;
+
+    const queueName = this.getQueueName(topic, options.queueName);
+    const queueArguments = { ...options.arguments };
+
+    if (
+      this.config.deadLetterExchange &&
+      !queueName.startsWith("dlq.") &&
+      this.config.deadLetterQueue
+    ) {
+      queueArguments["x-dead-letter-exchange"] = this.config.deadLetterExchange;
+      queueArguments["x-dead-letter-routing-key"] = topic;
+    }
+
+    const { queue: queueCreated } = await this.channel.assertQueue(queueName, {
+      exclusive: options.exclusive ?? !options.queueName,
+      durable: options.durable ?? !!options.queueName,
+      autoDelete: options.autoDelete ?? !options.queueName,
+      arguments: queueArguments,
+    });
+
+    await this.channel.bindQueue(
+      queueCreated,
+      this.rabbitConfig.exchange,
+      topic
+    );
+
+    const { consumerTag } = await this.channel.consume(
+      queueCreated,
+      this.createMessageHandler(subscriptionId, handler, options.ackMode),
+      { noAck: options.ackMode === "auto" }
+    );
+
+    // Update the subscription with queue and consumer info
+    const subscription = this.subscriptions.get(subscriptionId);
+    if (subscription) {
+      subscription.consumerTag = consumerTag;
+      subscription.queueName = queueCreated;
     }
   }
 
@@ -485,11 +524,11 @@ export class RabbitMQClient extends MessagingClient {
 
     try {
       // Create DLX exchange and queue
-      await this.channel.assertExchange(dlxExchange, "fanout", {
+      await this.channel.assertExchange(dlxExchange, "topic", {
         durable: true,
       });
       await this.channel.assertQueue(dlxQueue, { durable: true });
-      await this.channel.bindQueue(dlxQueue, dlxExchange, "");
+      await this.channel.bindQueue(dlxQueue, dlxExchange, "#");
 
       // Create main queue with DLX settings
       const queueName = this.getQueueName(topic, options.queueName);
@@ -503,7 +542,7 @@ export class RabbitMQClient extends MessagingClient {
           arguments: {
             ...(options.arguments || {}),
             "x-dead-letter-exchange": dlxExchange, // Route failed messages to DLX
-            "x-dead-letter-routing-key": dlxQueue,
+            "x-dead-letter-routing-key": `failed.${topic}`,
           },
         }
       );
@@ -809,51 +848,14 @@ export class RabbitMQClient extends MessagingClient {
     if (this.reconnecting || this.connection) return;
 
     this.reconnecting = true;
-    this.reconnectAttempts++;
 
-    // Check if we've exceeded max reconnection attempts
-    if (this.reconnectAttempts > this.maxReconnectAttempts) {
-      this.log(
-        "error",
-        `Max reconnection attempts (${this.maxReconnectAttempts}) reached. Stopping reconnection.`
-      );
-      this.reconnecting = false;
-      this.rabbitEventEmitter.emit(
-        "error",
-        new Error("Max reconnection attempts reached")
-      );
-      return;
-    }
+    // Reset connection state
+    this.connection = null;
+    this.channel = null;
 
-    // Use exponential backoff for retry delays
-    const delay = Math.min(
-      1000 * Math.pow(2, this.reconnectAttempts - 1),
-      30000
-    ); // Max 30 seconds
-
-    this.log(
-      "info",
-      `Scheduling reconnection attempt ${this.reconnectAttempts} in ${delay}ms...`
-    );
-
-    this.reconnectTimeout = setTimeout(async () => {
-      try {
-        this.log("info", "Attempting to reconnect to RabbitMQ...");
-        await this.connect();
-
-        if (this.reconnectCallback) {
-          this.reconnectCallback();
-        }
-
-        this.rabbitEventEmitter.emit("reconnected");
-        this.reconnecting = false;
-        this.reconnectAttempts = 0; // Reset attempts on successful connection
-      } catch (error) {
-        this.log("error", `Failed to reconnect to RabbitMQ: ${error}`);
-        this.reconnecting = false;
-        this.scheduleReconnect(); // Try again with increased delay
-      }
-    }, delay);
+    // Start new connection attempt
+    this.connect();
+    this.reconnecting = false;
   }
 
   private async resubscribeAll(): Promise<void> {
