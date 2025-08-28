@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.2.9
+
+### Patch Changes
+
+- framemax fix
+
 ## 1.2.8
 
 ### Patch Changes
