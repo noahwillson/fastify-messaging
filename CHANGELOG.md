@@ -1,5 +1,11 @@
 # fastify-messaging
 
+## 1.2.8
+
+### Patch Changes
+
+- 2659812: feat(rabbitmq): add frameMax support
+
 ## 1.2.6
 
 ### Patch Changes
