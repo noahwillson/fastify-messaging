@@ -8,6 +8,7 @@ export interface RabbitMQConfig extends MessagingConfig {
   vhost?: string;
   heartbeat?: number;
   connectionTimeout?: number;
+  frameMax?: number;
   maxReconnectAttempts?: number;
   reconnectBackoffMultiplier?: number;
   maxReconnectDelay?: number;

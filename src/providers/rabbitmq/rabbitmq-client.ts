@@ -307,6 +307,7 @@ export class RabbitMQClient extends MessagingClient {
           heartbeat: this.rabbitConfig.heartbeat || 60,
           vhost: this.rabbitConfig.vhost || "/",
           timeout: this.rabbitConfig.connectionTimeout,
+          frameMax: this.rabbitConfig.frameMax,
         });
         this.connection = conn;
 
