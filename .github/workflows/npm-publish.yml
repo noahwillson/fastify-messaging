@@ -46,7 +46,32 @@ jobs:
         run: npm run build
 
       - name: Publish to npm
-        run: npx changeset publish
+        # bash with pipefail, so a failed publish is not hidden by tee
+        shell: bash
+        run: npx changeset publish | tee publish.log
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tag and release only what was just published, on the commit that was published.
+      # Tags created with GITHUB_TOKEN do not start other workflows.
+      - name: Create tag and GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! grep -q "packages published successfully" publish.log; then
+            echo "Nothing was published; no release to create."
+            exit 0
+          fi
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG already exists."
+            exit 0
+          fi
+          PREVIOUS=$(git tag --list 'v*' --sort=-v:refname | grep -vx "$TAG" | head -n 1)
+          awk -v heading="## $VERSION" '$0 == heading { found = 1; next } /^## / { if (found) exit } found' CHANGELOG.md > release-notes.md
+          if [ -n "$PREVIOUS" ]; then
+            printf '\n**Full Changelog**: %s/%s/compare/%s...%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$PREVIOUS" "$TAG" >> release-notes.md
+          fi
+          gh release create "$TAG" --target "$(git rev-parse HEAD)" --title "$TAG" --notes-file release-notes.md --latest
