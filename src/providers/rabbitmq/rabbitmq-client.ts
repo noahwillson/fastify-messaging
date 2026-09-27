@@ -64,9 +64,6 @@ export class RabbitMQClient extends MessagingClient {
       reconnectInterval: 5000,
       ...rabbitConfig,
     };
-
-    // Start connection monitoring
-    this.startConnectionMonitor();
   }
 
   /**
@@ -267,9 +264,6 @@ export class RabbitMQClient extends MessagingClient {
     }
     if (!this.connectPromise) {
       this.closedByUser = false;
-      if (!this.connectionMonitorInterval) {
-        this.startConnectionMonitor();
-      }
       this.connectPromise = this.establishConnection().finally(() => {
         this.connectPromise = null;
       });
@@ -326,6 +320,10 @@ export class RabbitMQClient extends MessagingClient {
       this.connection = openedConn;
       this.channel = ch;
       this.isConnectionPermanentlyDown = false;
+      if (this.connectionMonitorInterval) {
+        clearInterval(this.connectionMonitorInterval);
+        this.connectionMonitorInterval = undefined;
+      }
 
       const isReconnect = this.hasConnectedOnce;
       this.hasConnectedOnce = true;
@@ -1155,6 +1153,8 @@ export class RabbitMQClient extends MessagingClient {
         this.attemptRecovery();
       }
     }, 300000); // Every 5 minutes
+    // Only a background recovery attempt: never the reason a process stays alive.
+    this.connectionMonitorInterval.unref();
   }
 
   public async attemptRecovery(): Promise<void> {
@@ -1197,6 +1197,8 @@ export class RabbitMQClient extends MessagingClient {
           `Max reconnect attempts reached (${error.message}). RabbitMQ connection is offline. Server remains operational.`
         );
         this.emitEvent("connection_permanently_down");
+        // Retry every few minutes in the background (see attemptRecovery).
+        this.startConnectionMonitor();
       }
       return;
     }

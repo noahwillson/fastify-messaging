@@ -1,6 +1,6 @@
 # fastify-messaging
 
-A flexible, extensible messaging framework for Fastify microservices that abstracts away the specific message broker implementation.
+A flexible, extensible messaging framework for Fastify, Express and plain Node.js microservices that abstracts away the specific message broker implementation.
 
 [![npm version](https://img.shields.io/npm/v/fastify-messaging.svg)](https://www.npmjs.com/package/fastify-messaging)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -10,6 +10,8 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
 
 1. [Features](#features)
 2. [Installation](#installation)
+   - [Usage with Express](#usage-with-express)
+   - [Usage with plain Node.js](#usage-with-plain-nodejs)
 3. [Quick Start](#quick-start)
    - [Publisher Service](#publisher-service)
    - [Consumer Service](#consumer-service)
@@ -47,7 +49,8 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
   - Configurable logging levels
   - Event-driven connection lifecycle management
   - Graceful shutdown handling
-- Fastify plugin for easy integration
+- Fastify plugin (Fastify 4 and 5) and Express adapter (Express 4 and 5); also usable from plain Node.js
+- Delayed retries with dead-lettering and replay of failed messages
 - TypeScript support with generics for message types
 - Automatic reconnection with configurable intervals and exponential backoff
 - Message TTL and priority support
@@ -67,6 +70,79 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
 ```bash
 npm install fastify-messaging
 ```
+
+Pick the entry point for your framework. Only the Fastify ones load Fastify:
+
+| Import | Contains | Use it for |
+|---|---|---|
+| `fastify-messaging` | core + Fastify plugin | Fastify (unchanged, existing code keeps working) |
+| `fastify-messaging/fastify` | core + Fastify plugin | Fastify |
+| `fastify-messaging/express` | core + Express adapter | Express |
+| `fastify-messaging/core` | `RabbitMQClient`, types, errors | plain Node.js workers, scripts, other frameworks |
+
+`fastify` and `express` are optional peer dependencies: install the one you use.
+
+## Usage with Express
+
+```typescript
+import express from "express";
+import { expressMessaging, RabbitMQClient } from "fastify-messaging/express";
+
+const app = express();
+const client = new RabbitMQClient({ url: "amqp://localhost", exchange: "orders" });
+
+// Connects, then exposes the API as app.locals.messaging and req.messaging.
+// Call it before registering routes that use req.messaging.
+const messaging = await expressMessaging(app, {
+  client,
+  requireConnection: true, // reject if RabbitMQ is unreachable (default false)
+  logger: console, // any pino/winston/console-style logger
+});
+
+await messaging.subscribe("order.created", async (msg) => {
+  console.log("new order", msg.content);
+}, { queueName: "billing.orders", ackMode: "auto" });
+
+app.post("/orders", express.json(), async (req, res) => {
+  await req.messaging.publish("order.created", req.body);
+  res.status(202).end();
+});
+
+app.get("/health", (req, res) => {
+  res.json(req.messaging.getConnectionStatus());
+});
+
+const server = app.listen(3000);
+
+// Express has no shutdown hook: finish in-flight messages on SIGTERM.
+process.on("SIGTERM", () => {
+  server.close(() => void messaging.shutdown().then(() => process.exit(0)));
+});
+```
+
+## Usage with plain Node.js
+
+```typescript
+import { RabbitMQClient } from "fastify-messaging/core";
+
+const client = new RabbitMQClient({ url: "amqp://localhost", exchange: "orders" });
+client.on("error", (err) => console.error(err));
+
+await client.connect(); // never rejects; check client.isConnected() to fail fast
+
+await client.subscribe("order.created", async (msg) => {
+  console.log(msg.content);
+}, { queueName: "worker.orders", ackMode: "auto", retry: { delays: [5000, 60000] } });
+
+process.on("SIGTERM", async () => {
+  await client.gracefulShutdown();
+  process.exit(0);
+});
+```
+
+A client does not keep the process alive by itself: only its open connection or pending
+reconnect attempts do, so short scripts can exit once they call `close()` or
+`gracefulShutdown()`.
 
 ## Quick Start
 

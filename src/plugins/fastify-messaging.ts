@@ -1,12 +1,7 @@
 import { FastifyPluginAsync, FastifyInstance } from "fastify";
 import fp from "fastify-plugin";
 import { MessagingClient } from "../core/messaging-client";
-import { ConnectionError } from "../core/errors";
-import {
-  MessageHandler,
-  MessageOptions,
-  SubscriptionOptions,
-} from "../core/types";
+import { createMessaging, Messaging, startClient } from "../core/messaging";
 
 export interface FastifyMessagingOptions {
   client: MessagingClient;
@@ -25,37 +20,8 @@ export interface FastifyMessagingOptions {
   shutdownTimeout?: number;
 }
 
-export interface FastifyMessaging {
-  client: MessagingClient;
-  isConnected(): boolean;
-  getConnectionStatus(): ReturnType<MessagingClient["getConnectionStatus"]>;
-  publish<T>(topic: string, message: T, options?: MessageOptions): Promise<boolean>;
-  publishToFanout<T>(
-    eventType: string,
-    message: T,
-    options?: MessageOptions
-  ): Promise<boolean>;
-  subscribe<T>(
-    topic: string,
-    handler: MessageHandler<T>,
-    options?: SubscriptionOptions
-  ): Promise<string>;
-  subscribeToFanout<T>(
-    eventType: string,
-    handler: MessageHandler<T>,
-    queueName: string,
-    options?: SubscriptionOptions
-  ): Promise<string>;
-  subscribeWithDLX<T>(
-    topic: string,
-    handler: MessageHandler<T>,
-    dlxExchange: string,
-    dlxQueue: string,
-    options?: SubscriptionOptions
-  ): Promise<string>;
-  unsubscribe(subscriptionId: string): Promise<void>;
-  onReconnect(callback: () => void): void;
-}
+/** `fastify.messaging`; the same API the Express adapter exposes. */
+export interface FastifyMessaging extends Messaging {}
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -72,36 +38,16 @@ const fastifyMessaging: FastifyPluginAsync<FastifyMessagingOptions> = async (
   fastify: FastifyInstance,
   options: FastifyMessagingOptions
 ) => {
-  const { client, requireConnection = false, useFastifyLogger = true } = options;
+  const { client, requireConnection, useFastifyLogger = true } = options;
 
-  if (useFastifyLogger && !client.getLogger()) {
-    client.setLogger(fastify.log.child({ plugin: "fastify-messaging" }));
-  }
+  await startClient(client, {
+    requireConnection,
+    logger: useFastifyLogger
+      ? fastify.log.child({ plugin: "fastify-messaging" })
+      : undefined,
+  });
 
-  // Never rejects: on failure the client schedules reconnects in the background.
-  await client.connect();
-
-  if (requireConnection && !client.isConnected()) {
-    // Stop the background reconnects, or they would keep the process alive after boot failed.
-    await client.close();
-    throw new ConnectionError(
-      "fastify-messaging: could not connect to the message broker (requireConnection is set)"
-    );
-  }
-
-  const messaging: FastifyMessaging = {
-    client,
-    isConnected: () => client.isConnected(),
-    getConnectionStatus: () => client.getConnectionStatus(),
-    publish: client.publish.bind(client),
-    publishToFanout: client.publishToFanout.bind(client),
-    subscribe: client.subscribe.bind(client),
-    subscribeToFanout: client.subscribeToFanout.bind(client),
-    subscribeWithDLX: client.subscribeWithDLX.bind(client),
-    unsubscribe: client.unsubscribe.bind(client),
-    onReconnect: client.onReconnect.bind(client),
-  };
-  fastify.decorate("messaging", messaging);
+  fastify.decorate("messaging", createMessaging(client));
 
   // Close connection when Fastify closes
   fastify.addHook("onClose", async () => {
