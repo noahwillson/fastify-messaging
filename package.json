@@ -19,7 +19,8 @@
     "example:advanced-dlx": "ts-node examples/advanced-dlx.ts",
     "example:custom-exchanges": "ts-node examples/custom-exchanges.ts",
     "example:connection-resilience": "ts-node examples/connection-resilience.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.typecheck.json && tsc -p tsconfig.fastify4.json"
   },
   "keywords": [
     "fastify",
@@ -37,14 +38,15 @@
     "uuid": "^11.1.0"
   },
   "peerDependencies": {
-    "fastify": "^4.0.0"
+    "fastify": "^4.0.0 || ^5.0.0"
   },
   "devDependencies": {
     "@changesets/cli": "^2.28.1",
     "@types/amqplib": "^0.8.2",
     "@types/node": "^18.16.0",
     "@types/uuid": "^9.0.2",
-    "fastify": "^4.17.0",
+    "fastify": "^5.12.5",
+    "fastify4": "npm:fastify@^4.29.1",
     "ts-node": "^10.9.1",
     "typescript": "^5.1.6",
     "vitest": "^3.2.7"

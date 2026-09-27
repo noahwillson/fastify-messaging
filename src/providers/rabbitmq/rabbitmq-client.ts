@@ -49,7 +49,6 @@ export class RabbitMQClient extends MessagingClient {
   private subscriptions: Map<string, Subscription> = new Map();
   private reconnectCallback: (() => void) | null = null;
   private rabbitEventEmitter: EventEmitter = new EventEmitter();
-  private logLevel: "info" | "warn" | "error" = "info";
   protected config: RabbitMQConfig;
   private reconnectAttempts: number = 0;
   private isConnectionPermanentlyDown: boolean = false;
@@ -114,28 +113,6 @@ export class RabbitMQClient extends MessagingClient {
    */
   public onReconnect(callback: () => void): void {
     this.reconnectCallback = callback;
-  }
-
-  /**
-   * Sets the logging level for the RabbitMQ client.
-   * @param {"info" | "warn" | "error"} level - The logging level to set.
-   */
-  public setLogLevel(level: "info" | "warn" | "error"): void {
-    this.logLevel = level;
-  }
-
-  /**
-   * Log messages based on the current log level.
-   */
-  private log(level: "info" | "warn" | "error", message: string): void {
-    const timestamp = new Date().toISOString();
-    if (
-      this.logLevel === "info" ||
-      (this.logLevel === "warn" && level !== "info") ||
-      level === "error"
-    ) {
-      console[level](`[${timestamp}] [RabbitMQClient] ${message}`);
-    }
   }
 
   /**

@@ -76,8 +76,21 @@ export interface MessageHandler<T = any> {
   (message: Message<T>): Promise<void> | void;
 }
 
+/**
+ * Minimal logger contract. pino (e.g. fastify.log), winston and console all satisfy it.
+ */
+export interface MessagingLogger {
+  info(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
+}
+
+export type LogLevel = "info" | "warn" | "error";
+
 export interface MessagingConfig {
   url: string;
+  /** Where client logs go. Defaults to console with timestamps. */
+  logger?: MessagingLogger;
   exchange: string;
   exchangeType?: "direct" | "topic" | "fanout" | "headers";
   prefetch?: number;

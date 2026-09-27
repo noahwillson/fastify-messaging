@@ -6,6 +6,8 @@ export {
   MessagingConfig,
   SubscriptionOptions,
   RetryOptions,
+  MessagingLogger,
+  LogLevel,
   PublishFunction,
 } from "./core/types";
 export {
@@ -20,3 +22,7 @@ export { RabbitMQClient, RabbitMQConfig } from "./providers";
 
 // Plugin exports
 export { default as fastifyMessaging } from "./plugins/fastify-messaging";
+export type {
+  FastifyMessaging,
+  FastifyMessagingOptions,
+} from "./plugins/fastify-messaging";

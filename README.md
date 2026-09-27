@@ -310,23 +310,45 @@ await client.connect();
 
 ### fastifyMessaging
 
-Fastify plugin that integrates a messaging client with Fastify.
+Fastify plugin that integrates a messaging client with Fastify. Supports Fastify 4 and 5.
 
 #### Options
 
 ```typescript
 interface FastifyMessagingOptions {
   client: MessagingClient;
+  requireConnection?: boolean; // fail app.ready()/listen() if the broker is unreachable (default false)
+  useFastifyLogger?: boolean; // send client logs to fastify.log unless the client has a logger (default true)
+  shutdownTimeout?: number; // ms to wait for in-flight messages on app.close() (default 5000)
 }
 ```
+
+By default the app boots even when RabbitMQ is down, and the client keeps reconnecting in
+the background. Set `requireConnection: true` to fail fast instead.
 
 #### Example
 
 ```typescript
+import { fastifyMessaging, FastifyMessagingOptions } from "fastify-messaging";
+
 await fastify.register(fastifyMessaging, {
   client: messagingClient,
-});
+  requireConnection: true,
+} satisfies FastifyMessagingOptions);
+
+// Health check
+fastify.get("/health", async () => fastify.messaging.getConnectionStatus());
 ```
+
+`fastify.messaging` exposes `publish`, `publishToFanout`, `subscribe`, `subscribeToFanout`,
+`subscribeWithDLX`, `unsubscribe`, `onReconnect`, `isConnected`, `getConnectionStatus` and the
+underlying `client`.
+
+#### Logging
+
+Any client accepts a `logger` with `info`/`warn`/`error` methods (pino, winston or console),
+via the `logger` config option or `client.setLogger()`. Inside Fastify the plugin uses
+`fastify.log` automatically.
 
 ### Message Types
 
