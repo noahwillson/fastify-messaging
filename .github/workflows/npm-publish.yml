@@ -10,7 +10,12 @@ permissions:
   pull-requests: write
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
   release:
+    # Never publish a build whose tests fail.
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
