@@ -1,6 +1,6 @@
 # fastify-messaging
 
-A flexible, extensible messaging framework for Fastify microservices that abstracts away the specific message broker implementation.
+A flexible, extensible messaging framework for Fastify, Express and plain Node.js microservices that abstracts away the specific message broker implementation.
 
 [![npm version](https://img.shields.io/npm/v/fastify-messaging.svg)](https://www.npmjs.com/package/fastify-messaging)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -10,6 +10,8 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
 
 1. [Features](#features)
 2. [Installation](#installation)
+   - [Usage with Express](#usage-with-express)
+   - [Usage with plain Node.js](#usage-with-plain-nodejs)
 3. [Quick Start](#quick-start)
    - [Publisher Service](#publisher-service)
    - [Consumer Service](#consumer-service)
@@ -23,6 +25,7 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
    - [Fanout Exchanges](#fanout-exchanges)
    - [Custom Exchanges](#custom-exchanges)
    - [Dead Letter Exchanges](#dead-letter-exchanges-dlx)
+   - [Retrying Failed Messages](#retrying-failed-messages)
    - [Event Handling](#event-handling)
    - [Graceful Shutdown](#graceful-shutdown)
 8. [Topic Patterns (RabbitMQ)](#topic-patterns-rabbitmq)
@@ -46,7 +49,8 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
   - Configurable logging levels
   - Event-driven connection lifecycle management
   - Graceful shutdown handling
-- Fastify plugin for easy integration
+- Fastify plugin (Fastify 4 and 5) and Express adapter (Express 4 and 5); also usable from plain Node.js
+- Delayed retries with dead-lettering and replay of failed messages
 - TypeScript support with generics for message types
 - Automatic reconnection with configurable intervals and exponential backoff
 - Message TTL and priority support
@@ -66,6 +70,79 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
 ```bash
 npm install fastify-messaging
 ```
+
+Pick the entry point for your framework. Only the Fastify ones load Fastify:
+
+| Import | Contains | Use it for |
+|---|---|---|
+| `fastify-messaging` | core + Fastify plugin | Fastify (unchanged, existing code keeps working) |
+| `fastify-messaging/fastify` | core + Fastify plugin | Fastify |
+| `fastify-messaging/express` | core + Express adapter | Express |
+| `fastify-messaging/core` | `RabbitMQClient`, types, errors | plain Node.js workers, scripts, other frameworks |
+
+`fastify` and `express` are optional peer dependencies: install the one you use.
+
+## Usage with Express
+
+```typescript
+import express from "express";
+import { expressMessaging, RabbitMQClient } from "fastify-messaging/express";
+
+const app = express();
+const client = new RabbitMQClient({ url: "amqp://localhost", exchange: "orders" });
+
+// Connects, then exposes the API as app.locals.messaging and req.messaging.
+// Call it before registering routes that use req.messaging.
+const messaging = await expressMessaging(app, {
+  client,
+  requireConnection: true, // reject if RabbitMQ is unreachable (default false)
+  logger: console, // any pino/winston/console-style logger
+});
+
+await messaging.subscribe("order.created", async (msg) => {
+  console.log("new order", msg.content);
+}, { queueName: "billing.orders", ackMode: "auto" });
+
+app.post("/orders", express.json(), async (req, res) => {
+  await req.messaging.publish("order.created", req.body);
+  res.status(202).end();
+});
+
+app.get("/health", (req, res) => {
+  res.json(req.messaging.getConnectionStatus());
+});
+
+const server = app.listen(3000);
+
+// Express has no shutdown hook: finish in-flight messages on SIGTERM.
+process.on("SIGTERM", () => {
+  server.close(() => void messaging.shutdown().then(() => process.exit(0)));
+});
+```
+
+## Usage with plain Node.js
+
+```typescript
+import { RabbitMQClient } from "fastify-messaging/core";
+
+const client = new RabbitMQClient({ url: "amqp://localhost", exchange: "orders" });
+client.on("error", (err) => console.error(err));
+
+await client.connect(); // never rejects; check client.isConnected() to fail fast
+
+await client.subscribe("order.created", async (msg) => {
+  console.log(msg.content);
+}, { queueName: "worker.orders", ackMode: "auto", retry: { delays: [5000, 60000] } });
+
+process.on("SIGTERM", async () => {
+  await client.gracefulShutdown();
+  process.exit(0);
+});
+```
+
+A client does not keep the process alive by itself: only its open connection or pending
+reconnect attempts do, so short scripts can exit once they call `close()` or
+`gracefulShutdown()`.
 
 ## Quick Start
 
@@ -263,11 +340,13 @@ interface RabbitMQConfig {
   exchangeType?: "direct" | "topic" | "fanout" | "headers";
   prefetch?: number;
   vhost?: string;
-  heartbeat?: number;
+  heartbeat?: number; // seconds, default 60
   connectionTimeout?: number;
-  maxReconnectAttempts?: number;
-  reconnectBackoffMultiplier?: number;
-  maxReconnectDelay?: number;
+  frameMax?: number; // default 131072 (RabbitMQ 4.1+ rejects values below 8192)
+  maxReconnectAttempts?: number; // default 10
+  reconnectInterval?: number; // delay before the first reconnect in ms, default 2000
+  reconnectBackoffMultiplier?: number; // default 2
+  maxReconnectDelay?: number; // default 30000
   getExchangeName?: (eventType: string) => string;
   getQueueName?: (eventType: string, queueName?: string) => string;
   queueOptions?: {
@@ -307,23 +386,45 @@ await client.connect();
 
 ### fastifyMessaging
 
-Fastify plugin that integrates a messaging client with Fastify.
+Fastify plugin that integrates a messaging client with Fastify. Supports Fastify 4 and 5.
 
 #### Options
 
 ```typescript
 interface FastifyMessagingOptions {
   client: MessagingClient;
+  requireConnection?: boolean; // fail app.ready()/listen() if the broker is unreachable (default false)
+  useFastifyLogger?: boolean; // send client logs to fastify.log unless the client has a logger (default true)
+  shutdownTimeout?: number; // ms to wait for in-flight messages on app.close() (default 5000)
 }
 ```
+
+By default the app boots even when RabbitMQ is down, and the client keeps reconnecting in
+the background. Set `requireConnection: true` to fail fast instead.
 
 #### Example
 
 ```typescript
+import { fastifyMessaging, FastifyMessagingOptions } from "fastify-messaging";
+
 await fastify.register(fastifyMessaging, {
   client: messagingClient,
-});
+  requireConnection: true,
+} satisfies FastifyMessagingOptions);
+
+// Health check
+fastify.get("/health", async () => fastify.messaging.getConnectionStatus());
 ```
+
+`fastify.messaging` exposes `publish`, `publishToFanout`, `subscribe`, `subscribeToFanout`,
+`subscribeWithDLX`, `unsubscribe`, `onReconnect`, `isConnected`, `getConnectionStatus` and the
+underlying `client`.
+
+#### Logging
+
+Any client accepts a `logger` with `info`/`warn`/`error` methods (pino, winston or console),
+via the `logger` config option or `client.setLogger()`. Inside Fastify the plugin uses
+`fastify.log` automatically.
 
 ### Message Types
 
@@ -537,7 +638,7 @@ await client.subscribeWithDLX(
 #### Advanced DLX Features
 
 - **Configurable Routing Keys**: Control how messages are routed to and within the DLX
-- **TTL for Dead Letter Queues**: Messages in DLQs expire after 7 days by default
+- **Error Details**: Messages the client dead-letters after a handler error carry `x-error`, `x-error-stack`, `x-failed-at`, `x-original-routing-key` and `x-retry-count` headers
 - **Custom Exchange Types**: DLX uses topic exchange type for flexible routing patterns
 - **Microservice Isolation**: Each service can have its own DLQ with specific routing patterns
 
@@ -549,7 +650,7 @@ await client.subscribe(
   "#", // Match all routing keys
   async (msg) => {
     console.log("Failed message:", msg.content);
-    console.log("Original routing key:", msg.fields.routingKey);
+    console.log("Original routing key:", msg.options?.headers?.["x-original-routing-key"]);
 
     // Process failed message or log it
     msg.ack();
@@ -560,6 +661,52 @@ await client.subscribe(
   }
 );
 ```
+
+### Retrying Failed Messages
+
+A dead-letter queue only parks messages; RabbitMQ never retries them by itself. To retry a
+failing handler with a delay before giving up, pass `retry`:
+
+```typescript
+await client.subscribe(
+  "order.created",
+  async (msg) => {
+    console.log(`attempt ${msg.retryCount! + 1}`);
+    await processOrder(msg.content); // throwing triggers a retry
+  },
+  {
+    queueName: "billing.orders", // required with retry
+    ackMode: "auto",
+    retry: {
+      delays: [5_000, 30_000, 300_000], // 3 retries: after 5s, 30s, 5min
+      nonRetryable: (err) => err instanceof ValidationError, // skip retries
+    },
+  }
+);
+```
+
+How it works:
+
+- For each delay the client declares `<queueName>.retry.<delay>`, a queue with that TTL whose
+  expired messages go straight back to `<queueName>` (via the default exchange, so other
+  queues bound to the same routing key never receive the retry).
+- `msg.retryCount` is `0` on the first delivery and grows with each retry.
+- When retries are exhausted, the error is non-retryable, or the body is not valid JSON, the
+  message is dead-lettered with error headers: to the `subscribeWithDLX` exchange, else
+  `retry.deadLetterQueue`, else the global `deadLetterExchange`, else `<queueName>.dlq`.
+- Copies are published with publisher confirms, and the original is acked only after the
+  broker confirmed the copy.
+
+Retry works with `subscribe`, `subscribeToFanout` and `subscribeWithDLX`, in both ack modes.
+In `manual` mode it applies when the handler throws before calling `ack`/`nack`/`reject`.
+
+Once the cause is fixed, move parked messages back with a fresh retry budget:
+
+```typescript
+const moved = await client.replayDeadLetters("billing.orders.dlq", { limit: 1000 });
+```
+
+Without `retry` or a DLX, a failing message is requeued for immediate redelivery, as before.
 
 ### Event Handling
 
@@ -844,6 +991,13 @@ await client.subscribeWithDLX(
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+Tests run against a real RabbitMQ broker (default `amqp://localhost`, override with `AMQP_URL`).
+They only create uniquely named `test.*` queues and exchanges and delete them afterwards:
+
+```bash
+npm test
+```
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)

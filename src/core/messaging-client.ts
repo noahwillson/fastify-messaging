@@ -1,9 +1,11 @@
 // src/core/messaging-client.ts
 import {
+  LogLevel,
   Message,
   MessageHandler,
   MessageOptions,
   MessagingConfig,
+  MessagingLogger,
   SubscriptionOptions,
 } from "./types";
 
@@ -17,12 +19,52 @@ export abstract class MessagingClient {
   protected config: MessagingConfig;
   private eventEmitter = new EventEmitter();
   protected connection: any | null = null;
+  private logger?: MessagingLogger;
+  private logLevel: LogLevel = "info";
 
   constructor(config: MessagingConfig) {
     this.config = {
       reconnectInterval: 5000,
       ...config,
     };
+    this.logger = config.logger;
+  }
+
+  /**
+   * Send client logs to your logger (e.g. `fastify.log`, pino, winston).
+   * Without one, logs go to console.
+   */
+  public setLogger(logger: MessagingLogger): void {
+    this.logger = logger;
+  }
+
+  /** The logger set via config or setLogger(), or undefined when logging to console. */
+  public getLogger(): MessagingLogger | undefined {
+    return this.logger;
+  }
+
+  /**
+   * Sets the minimum level of messages the client logs.
+   * @param level - "info" logs everything, "warn" skips info, "error" logs errors only.
+   */
+  public setLogLevel(level: LogLevel): void {
+    this.logLevel = level;
+  }
+
+  protected log(level: LogLevel, message: string): void {
+    const enabled =
+      this.logLevel === "info" ||
+      (this.logLevel === "warn" && level !== "info") ||
+      level === "error";
+    if (!enabled) {
+      return;
+    }
+    const line = `[${this.constructor.name}] ${message}`;
+    if (this.logger) {
+      this.logger[level](line);
+    } else {
+      console[level](`[${new Date().toISOString()}] ${line}`);
+    }
   }
 
   /**
@@ -46,7 +88,20 @@ export abstract class MessagingClient {
   }
 
   /**
-   * Emit lifecycle events
+   * Connection health. Providers with reconnect logic override this with real numbers.
+   */
+  public getConnectionStatus(): {
+    connected: boolean;
+    permanentFailure: boolean;
+    retryCount: number;
+  } {
+    return { connected: this.isConnected(), permanentFailure: false, retryCount: 0 };
+  }
+
+  /**
+   * Emit lifecycle events.
+   * An "error" with no listener would make EventEmitter throw, so it is dropped instead
+   * (handleError has already logged it).
    * @param event - The event to emit ("connected", "disconnected", "reconnected", "error")
    * @param args - Additional arguments to pass to the event listener
    */
@@ -54,6 +109,9 @@ export abstract class MessagingClient {
     event: "connected" | "disconnected" | "reconnected" | "error",
     ...args: any[]
   ): void {
+    if (event === "error" && this.eventEmitter.listenerCount("error") === 0) {
+      return;
+    }
     this.eventEmitter.emit(event, ...args);
   }
 
@@ -160,7 +218,7 @@ export abstract class MessagingClient {
    * @param context - Additional context about where the error occurred
    */
   protected handleError(error: Error, context: string): void {
-    console.error(`[MessagingClient] ${context}: ${error.message}`);
+    this.log("error", `${context}: ${error.message}`);
     this.emit("error", error);
   }
 }
