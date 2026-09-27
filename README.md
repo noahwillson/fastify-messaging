@@ -999,6 +999,18 @@ They only create uniquely named `test.*` queues and exchanges and delete them af
 npm test
 ```
 
+### Releasing
+
+`main` is protected: changes land through pull requests, and the **Test** checks must pass.
+To release, in the pull request:
+
+1. `npx changeset` to describe the change (patch/minor/major).
+2. `npx changeset version` to bump `package.json` and update `CHANGELOG.md`.
+3. Commit both. The **Test** check fails while un-versioned changesets remain.
+
+After merging, **Release to npm** runs the tests, publishes the new version, and creates
+its `v<version>` tag and GitHub release.
+
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
 3. Commit your changes (`git commit -m 'Add some amazing feature'`)
