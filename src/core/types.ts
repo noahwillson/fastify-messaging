@@ -22,9 +22,26 @@ export interface Message<T = any> {
   originalMessage?: ConsumeMessage; // Provider-specific message object
   timestamp?: Date;
   messageId?: string;
+  /** How many times this message has been retried (0 on first delivery). */
+  retryCount?: number;
   ack(): Promise<void>;
   nack(requeue?: boolean): Promise<void>;
   reject(requeue?: boolean): Promise<void>;
+}
+
+export interface RetryOptions {
+  /**
+   * Delay in ms before each retry; its length is the number of retries.
+   * e.g. [5000, 30000, 300000] retries three times with growing delays.
+   */
+  delays: number[];
+  /** Errors for which this returns true skip retries and go straight to the dead-letter queue. */
+  nonRetryable?: (error: unknown) => boolean;
+  /**
+   * Where exhausted messages are parked when no DLX applies.
+   * Defaults to `<queueName>.dlq`.
+   */
+  deadLetterQueue?: string;
 }
 
 export interface SubscriptionOptions {
@@ -36,6 +53,11 @@ export interface SubscriptionOptions {
   ackMode: "auto" | "manual";
   exchangeName?: string; // Custom exchange name to override the default
   exchangeType?: "direct" | "topic" | "fanout" | "headers"; // Exchange type for custom exchange
+  /**
+   * Retry failed messages after a delay instead of requeueing them immediately.
+   * Requires `queueName`. Once retries are exhausted the message is dead-lettered.
+   */
+  retry?: RetryOptions;
   arguments?: {
     "x-message-ttl"?: number;
     "x-expires"?: number;

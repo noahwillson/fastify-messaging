@@ -5,6 +5,7 @@ export {
   MessageOptions,
   MessagingConfig,
   SubscriptionOptions,
+  RetryOptions,
   PublishFunction,
 } from "./core/types";
 export {

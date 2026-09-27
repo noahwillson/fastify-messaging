@@ -46,7 +46,9 @@ export abstract class MessagingClient {
   }
 
   /**
-   * Emit lifecycle events
+   * Emit lifecycle events.
+   * An "error" with no listener would make EventEmitter throw, so it is dropped instead
+   * (handleError has already logged it).
    * @param event - The event to emit ("connected", "disconnected", "reconnected", "error")
    * @param args - Additional arguments to pass to the event listener
    */
@@ -54,6 +56,9 @@ export abstract class MessagingClient {
     event: "connected" | "disconnected" | "reconnected" | "error",
     ...args: any[]
   ): void {
+    if (event === "error" && this.eventEmitter.listenerCount("error") === 0) {
+      return;
+    }
     this.eventEmitter.emit(event, ...args);
   }
 

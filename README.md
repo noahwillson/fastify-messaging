@@ -23,6 +23,7 @@ A flexible, extensible messaging framework for Fastify microservices that abstra
    - [Fanout Exchanges](#fanout-exchanges)
    - [Custom Exchanges](#custom-exchanges)
    - [Dead Letter Exchanges](#dead-letter-exchanges-dlx)
+   - [Retrying Failed Messages](#retrying-failed-messages)
    - [Event Handling](#event-handling)
    - [Graceful Shutdown](#graceful-shutdown)
 8. [Topic Patterns (RabbitMQ)](#topic-patterns-rabbitmq)
@@ -263,11 +264,13 @@ interface RabbitMQConfig {
   exchangeType?: "direct" | "topic" | "fanout" | "headers";
   prefetch?: number;
   vhost?: string;
-  heartbeat?: number;
+  heartbeat?: number; // seconds, default 60
   connectionTimeout?: number;
-  maxReconnectAttempts?: number;
-  reconnectBackoffMultiplier?: number;
-  maxReconnectDelay?: number;
+  frameMax?: number; // default 131072 (RabbitMQ 4.1+ rejects values below 8192)
+  maxReconnectAttempts?: number; // default 10
+  reconnectInterval?: number; // delay before the first reconnect in ms, default 2000
+  reconnectBackoffMultiplier?: number; // default 2
+  maxReconnectDelay?: number; // default 30000
   getExchangeName?: (eventType: string) => string;
   getQueueName?: (eventType: string, queueName?: string) => string;
   queueOptions?: {
@@ -537,7 +540,7 @@ await client.subscribeWithDLX(
 #### Advanced DLX Features
 
 - **Configurable Routing Keys**: Control how messages are routed to and within the DLX
-- **TTL for Dead Letter Queues**: Messages in DLQs expire after 7 days by default
+- **Error Details**: Messages the client dead-letters after a handler error carry `x-error`, `x-error-stack`, `x-failed-at`, `x-original-routing-key` and `x-retry-count` headers
 - **Custom Exchange Types**: DLX uses topic exchange type for flexible routing patterns
 - **Microservice Isolation**: Each service can have its own DLQ with specific routing patterns
 
@@ -549,7 +552,7 @@ await client.subscribe(
   "#", // Match all routing keys
   async (msg) => {
     console.log("Failed message:", msg.content);
-    console.log("Original routing key:", msg.fields.routingKey);
+    console.log("Original routing key:", msg.options?.headers?.["x-original-routing-key"]);
 
     // Process failed message or log it
     msg.ack();
@@ -560,6 +563,52 @@ await client.subscribe(
   }
 );
 ```
+
+### Retrying Failed Messages
+
+A dead-letter queue only parks messages; RabbitMQ never retries them by itself. To retry a
+failing handler with a delay before giving up, pass `retry`:
+
+```typescript
+await client.subscribe(
+  "order.created",
+  async (msg) => {
+    console.log(`attempt ${msg.retryCount! + 1}`);
+    await processOrder(msg.content); // throwing triggers a retry
+  },
+  {
+    queueName: "billing.orders", // required with retry
+    ackMode: "auto",
+    retry: {
+      delays: [5_000, 30_000, 300_000], // 3 retries: after 5s, 30s, 5min
+      nonRetryable: (err) => err instanceof ValidationError, // skip retries
+    },
+  }
+);
+```
+
+How it works:
+
+- For each delay the client declares `<queueName>.retry.<delay>`, a queue with that TTL whose
+  expired messages go straight back to `<queueName>` (via the default exchange, so other
+  queues bound to the same routing key never receive the retry).
+- `msg.retryCount` is `0` on the first delivery and grows with each retry.
+- When retries are exhausted, the error is non-retryable, or the body is not valid JSON, the
+  message is dead-lettered with error headers: to the `subscribeWithDLX` exchange, else
+  `retry.deadLetterQueue`, else the global `deadLetterExchange`, else `<queueName>.dlq`.
+- Copies are published with publisher confirms, and the original is acked only after the
+  broker confirmed the copy.
+
+Retry works with `subscribe`, `subscribeToFanout` and `subscribeWithDLX`, in both ack modes.
+In `manual` mode it applies when the handler throws before calling `ack`/`nack`/`reject`.
+
+Once the cause is fixed, move parked messages back with a fresh retry budget:
+
+```typescript
+const moved = await client.replayDeadLetters("billing.orders.dlq", { limit: 1000 });
+```
+
+Without `retry` or a DLX, a failing message is requeued for immediate redelivery, as before.
 
 ### Event Handling
 
@@ -844,6 +893,13 @@ await client.subscribeWithDLX(
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+Tests run against a real RabbitMQ broker (default `amqp://localhost`, override with `AMQP_URL`).
+They only create uniquely named `test.*` queues and exchanges and delete them afterwards:
+
+```bash
+npm test
+```
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)

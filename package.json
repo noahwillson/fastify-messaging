@@ -18,7 +18,8 @@
     "example:dlx": "ts-node examples/test-dlx.ts",
     "example:advanced-dlx": "ts-node examples/advanced-dlx.ts",
     "example:custom-exchanges": "ts-node examples/custom-exchanges.ts",
-    "example:connection-resilience": "ts-node examples/connection-resilience.ts"
+    "example:connection-resilience": "ts-node examples/connection-resilience.ts",
+    "test": "vitest run"
   },
   "keywords": [
     "fastify",
@@ -45,6 +46,7 @@
     "@types/uuid": "^9.0.2",
     "fastify": "^4.17.0",
     "ts-node": "^10.9.1",
-    "typescript": "^5.1.6"
+    "typescript": "^5.1.6",
+    "vitest": "^3.2.7"
   }
 }
