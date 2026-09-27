@@ -36,6 +36,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # main is protected, so the release job cannot push a version bump:
+      # changesets must be turned into a version bump in the pull request itself.
+      - name: Check changesets are versioned
+        run: |
+          pending=$(find .changeset -name '*.md' ! -name README.md)
+          if [ -n "$pending" ]; then
+            echo "::error::Unreleased changesets: $pending. Run 'npx changeset version' and commit the result in this pull request."
+            exit 1
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
